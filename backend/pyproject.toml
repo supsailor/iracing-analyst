@@ -1,0 +1,34 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "iracing-analyst"
+version = "0.1.0"
+description = "Local iRacing lap telemetry analyst"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "uvicorn>=0.30,<1",
+  "numpy>=2.0,<3",
+  "python-multipart>=0.0.12,<1",
+  "platformdirs>=4.3,<5",
+  "pyirsdk>=1.3.5,<2; sys_platform == 'win32'",
+]
+
+[project.optional-dependencies]
+dev = ["httpx>=0.27,<1", "pytest>=8.3,<9", "ruff>=0.8,<1"]
+
+[project.scripts]
+iracing-analyst = "iracing_analyst.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["iracing_analyst"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
