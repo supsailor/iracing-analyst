@@ -26,3 +26,11 @@ def test_import_and_query(tmp_path, monkeypatch):
         )
         assert telemetry.status_code == 200
         assert len(telemetry.json()["distance_pct"]) == 1200
+        assert client.delete(f"/api/sessions/{report['session_id']}").status_code == 204
+
+
+def test_clear_requires_confirmation(tmp_path, monkeypatch):
+    monkeypatch.setattr(app_module, "store", SessionStore(tmp_path / "clear-store"))
+    with TestClient(app) as client:
+        assert client.delete("/api/sessions").status_code == 400
+        assert client.delete("/api/sessions?confirm=true").json() == {"deleted": 0}

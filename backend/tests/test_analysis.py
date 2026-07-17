@@ -45,3 +45,28 @@ def test_recommendations_are_bounded():
     assert len(report.recommendations) <= 3
     assert all(0 <= item.confidence <= 1 for item in report.recommendations)
 
+
+def test_two_laps_are_reported_as_insufficient():
+    report = analyze(synthetic_run(2))
+    assert report.data_sufficiency.status == "insufficient"
+    assert report.median_time is None
+    assert report.sector_optimal is None
+    assert report.improvement_actions == []
+
+
+def test_track_map_and_insights_are_structured():
+    report = analyze(synthetic_run())
+    assert report.track_map.available
+    assert report.track_map.source == "gps"
+    assert report.track_map.centerline
+    assert report.data_sufficiency.status == "ready"
+
+
+def test_spa_uses_official_corner_catalog():
+    run = synthetic_run()
+    run.metadata.update({"track": "Circuit de Spa-Francorchamps", "track_name": "spa", "official_turns": 19})
+    report = analyze(run)
+    assert report.official_turns == 19
+    assert len(report.segments) == 19
+    assert report.segments[0].name == "La Source"
+    assert report.segments[-1].name == "Bus Stop 2"

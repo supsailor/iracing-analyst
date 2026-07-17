@@ -2,6 +2,8 @@
 
 Local-first telemetry analysis for iRacing. The MVP captures the player's live telemetry on Windows, imports `.ibt` files, finds representative laps and corners, and explains the largest opportunities using deterministic rules.
 
+Version 0.2 groups reconnects and stints by iRacing session identity, separates Practice/Qualify/Race, adds Spa corner metadata, racing-line maps, annotated insights, and explicit data-sufficiency states.
+
 ## Development
 
 Requirements: Python 3.11+, Node.js 20+.
@@ -37,4 +39,3 @@ In iRacing, start the app before driving. On Windows it waits for the simulator 
 All data remains in the local application data directory. No account, cloud service, iRacing Data API, OAuth, or LLM is used.
 
 See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for runtime dependencies.
-
