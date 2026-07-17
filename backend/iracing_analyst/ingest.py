@@ -115,6 +115,7 @@ class LiveCollector:
         sdk = irsdk.IRSDK()
         collected: dict[str, list] = {key: [] for key in CHANNELS}
         metadata: dict[str, object] = {"source": "live"}
+        finalized = False
         while not self._stop.is_set():
             available = bool(sdk.startup())
             self.connected = available
@@ -125,13 +126,29 @@ class LiveCollector:
                         samples={k: np.asarray(v) for k, v in collected.items()}, metadata=metadata,
                     ))
                     collected = {key: [] for key in CHANNELS}
+                finalized = False
                 time.sleep(1.0)
                 continue
+            session_state = sdk["SessionState"]
+            checkered = isinstance(session_state, int) and session_state >= 5
+            if finalized and not checkered:
+                finalized = False
+            if checkered and self.recording and collected["session_time"]:
+                self.recording = False
+                self.on_complete(TelemetryRun(
+                    samples={k: np.asarray(v) for k, v in collected.items()}, metadata=metadata,
+                ))
+                collected = {key: [] for key in CHANNELS}
+                finalized = True
+            if checkered or finalized:
+                time.sleep(0.25)
+                continue
             self.recording = True
-            for target, source in VARIABLE_ALIASES.items():
-                value = sdk[source]
-                collected[target].append(0 if value is None else value)
             try:
+                sdk.freeze_var_buffer_latest()
+                for target, source in VARIABLE_ALIASES.items():
+                    value = sdk[source]
+                    collected[target].append(0 if value is None else value)
                 weekend = sdk["WeekendInfo"] or {}
                 driver = sdk["DriverInfo"] or {}
                 metadata.update({
@@ -140,5 +157,7 @@ class LiveCollector:
                 })
             except (AttributeError, IndexError, TypeError):
                 pass
+            finally:
+                sdk.unfreeze_var_buffer_latest()
             time.sleep(1 / 60)
         sdk.shutdown()
