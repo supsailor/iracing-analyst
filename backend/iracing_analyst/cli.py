@@ -43,11 +43,10 @@ def main() -> None:
         run = IbtReader().read(args.path) if args.path.suffix.lower() == ".ibt" else read_npz(args.path)
         print(json.dumps(analyze(run).model_dump(mode="json"), ensure_ascii=False, indent=2))
         return
-    port = args.port or free_port()
+    port = getattr(args, "port", 0) or free_port()
     threading.Timer(0.8, lambda: webbrowser.open(f"http://127.0.0.1:{port}")).start()
     uvicorn.run(app, host="127.0.0.1", port=port, log_level="info")
 
 
 if __name__ == "__main__":
     main()
-
