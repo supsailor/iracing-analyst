@@ -25,6 +25,17 @@ def test_pit_lap_is_excluded_but_other_laps_remain():
     assert sum(lap.valid for lap in laps) == 3
 
 
+def test_in_lap_transition_is_classified():
+    run = synthetic_run(3)
+    lap_mask = run.samples["lap"] == 2
+    run.samples["on_pit_road"][lap_mask & (run.samples["lap_dist_pct"] > 0.85)] = 1
+    report = analyze(run)
+    lap = next(item for item in report.laps if item.number == 2)
+    assert lap.display_type == "in_lap"
+    assert "in_lap" in lap.badges
+    assert not lap.valid
+
+
 def test_missing_data_lap_is_excluded():
     run = synthetic_run(3)
     mask = ~((run.samples["lap"] == 2) & (run.samples["lap_dist_pct"] > 0.7))
@@ -107,3 +118,37 @@ def test_pair_comparison_rejects_self_and_has_unique_insights():
         pass
     else:
         raise AssertionError("self-comparison must fail")
+
+
+def test_out_lap_and_terminal_fragment_are_reported_but_excluded():
+    run = synthetic_run(3)
+    prefix = 180
+    suffix = 240
+    samples = {}
+    for key, values in run.samples.items():
+        values = np.asarray(values)
+        first = values[:prefix].copy()
+        last = values[-suffix:].copy()
+        if key == "lap":
+            first[:] = 0
+            last[:] = 4
+        elif key == "lap_dist_pct":
+            first[:] = np.linspace(0, 0.15, prefix, endpoint=False)
+            last[:] = np.linspace(0, 0.2, suffix, endpoint=False)
+        elif key == "on_pit_road":
+            first[:60] = 1
+        elif key == "session_time":
+            first[:] = np.linspace(-3, -0.01, prefix)
+            last[:] = np.linspace(values[-1] + 0.01, values[-1] + 4, suffix)
+        samples[key] = np.concatenate([first, values, last])
+    run.samples = samples
+    report = analyze(run)
+    out_lap = next(lap for lap in report.laps if lap.number == 0)
+    incomplete = next(lap for lap in report.laps if lap.number == 4)
+    assert out_lap.display_type == "out_lap"
+    assert "out_lap" in out_lap.badges
+    assert not out_lap.valid
+    assert incomplete.display_type == "incomplete"
+    assert "incomplete" in incomplete.badges
+    assert not incomplete.valid
+    assert report.data_sufficiency.valid_laps == 3

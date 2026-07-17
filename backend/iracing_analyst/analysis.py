@@ -57,7 +57,8 @@ def normalize_laps(run: TelemetryRun) -> list[NormalizedLap]:
     result: list[NormalizedLap] = []
     for number in sorted(set(lap_no.tolist())):
         mask = lap_no == number
-        if number <= 0 or mask.sum() < 120:
+        # Preserve lap 0 and short terminal fragments for classification in the lap table.
+        if number < 0 or mask.sum() < 8:
             continue
         indices = np.flatnonzero(mask)
         lap_dist = dist[indices]
@@ -68,12 +69,12 @@ def normalize_laps(run: TelemetryRun) -> list[NormalizedLap]:
         coverage = float(unique_dist[-1] - unique_dist[0]) if unique_dist.size else 0
         duration = float(time[indices[-1]] - time[indices[0]])
         has_pit = bool(pit[indices].any())
-        out_lap = bool(pit[indices[0]]) and not bool(pit[indices[-1]])
+        out_lap = number == 0 or (bool(pit[indices[0]]) and not bool(pit[indices[-1]]))
         in_lap = not bool(pit[indices[0]]) and bool(pit[indices[-1]])
         missing = coverage < 0.94 or unique_dist.size < 120
         stopped = duration <= 0 or bool(np.mean(_as_float(run, "speed")[indices] < 1.0) > 0.08)
         # A completed incident lap remains analytically useful. Pit/out/in and incomplete laps do not.
-        valid = not (has_pit or missing or stopped)
+        valid = number > 0 and not (has_pit or missing or stopped or out_lap or in_lap)
         reason = "pit" if has_pit else "missing_data" if missing else "stopped" if stopped else (
             None
         )
@@ -430,10 +431,21 @@ def _lap_summaries(laps: list[NormalizedLap], best: NormalizedLap | None, median
             badges.append("clean")
         if not lap.valid:
             badges.append("invalid")
+        if lap.out_lap:
+            display_type = "out_lap"
+        elif lap.in_lap:
+            display_type = "in_lap"
+        elif lap.has_pit:
+            display_type = "pit"
+        elif lap.coverage < 0.94:
+            display_type = "incomplete"
+        else:
+            display_type = "lap"
         result.append(LapSummary(
             number=lap.number, time=lap.time, valid=lap.valid, representative=lap.representative,
             reason=lap.reason, delta_to_best=(lap.time - best.time if best else None), coverage=lap.coverage,
             incident_points=points, incident_events=events, badges=badges,
+            display_type=display_type,
         ))
     return result
 

@@ -161,6 +161,7 @@ class LapSummary(BaseModel):
     incident_points: int = 0
     incident_events: list[IncidentEvent] = Field(default_factory=list)
     badges: list[str] = Field(default_factory=list)
+    display_type: Literal["lap", "out_lap", "in_lap", "pit", "incomplete"] = "lap"
 
 
 class AnalysisReport(BaseModel):
