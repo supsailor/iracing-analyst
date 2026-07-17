@@ -47,7 +47,7 @@ Recommendations show the expected opportunity, the relevant corner and the brake
 
 ## Install in three steps
 
-1. Open the [latest release](https://github.com/supsailor/iracing-analyst/releases/latest) and download `iracing-analyst-v0.2.0-windows-x64.zip`.
+1. Open the [latest release](https://github.com/supsailor/iracing-analyst/releases/latest) and download `iracing-analyst-v0.2.1-windows-x64.zip`.
 2. Extract the archive to a folder you can keep. Do not run the executable from inside the ZIP.
 3. Start `iracing-analyst.exe`, then launch iRacing and drive. The report opens locally in your browser.
 
@@ -57,7 +57,7 @@ To analyze an existing session, enable iRacing disk telemetry with `Alt+L`, then
 
 The MVP executable is not code-signed, so Microsoft Defender SmartScreen may show an unknown-publisher warning. Only run builds downloaded from this repository's Releases page and verify the published SHA-256 checksum.
 
-## Supported in v0.2.0
+## Supported in v0.2.1
 
 - Windows 10/11 x64.
 - Road layouts and the local player's telemetry.

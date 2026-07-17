@@ -63,6 +63,6 @@ jobs:
           gh release create "${{ github.ref_name }}" `
             "dist/$asset" "dist/$asset.sha256" `
             --repo "${{ github.repository }}" `
-            --title "iRacing Analyst ${{ github.ref_name }} — First public MVP" `
+            --title "iRacing Analyst ${{ github.ref_name }}" `
             --notes-file "docs/releases/${{ github.ref_name }}.md" `
             --latest
