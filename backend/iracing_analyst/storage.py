@@ -12,6 +12,9 @@ from .analysis import analyze
 from .models import AnalysisReport, SessionListItem, TelemetryRun
 
 
+ANALYSIS_VERSION = 2
+
+
 class SessionStore:
     def __init__(self, root: Path):
         self.root = root
@@ -37,6 +40,7 @@ class SessionStore:
             "CREATE INDEX IF NOT EXISTS idx_sessions_session_key ON sessions(session_key)",
         )
         self.connection.commit()
+        self._reanalyze_outdated()
 
     def add(self, run: TelemetryRun, source: str | None = None) -> AnalysisReport:
         metadata = dict(run.metadata)
@@ -90,19 +94,57 @@ class SessionStore:
         previous_len = len(np.asarray(previous.samples.get("session_time", [])))
         fragment_len = len(np.asarray(fragment.samples.get("session_time", [])))
         merged = {}
+        previous_epoch = np.asarray(previous.samples.get("capture_epoch", np.zeros(previous_len)), dtype=int)
+        fragment_epoch = np.asarray(fragment.samples.get("capture_epoch", np.zeros(fragment_len)), dtype=int)
+        if fragment_len:
+            fragment_epoch = fragment_epoch + (int(previous_epoch.max()) + 1 if previous_len else 0)
         for key in keys:
             left = np.asarray(previous.samples.get(key, np.zeros(previous_len)))
             right = np.asarray(fragment.samples.get(key, np.zeros(fragment_len)))
             merged[key] = np.concatenate((left, right))
-        identity = np.asarray(merged.get("session_tick", []))
-        if not identity.size or np.all(identity == 0):
-            identity = np.round(np.asarray(merged["session_time"], dtype=float), 4)
+        merged["capture_epoch"] = np.concatenate((previous_epoch, fragment_epoch))
+        if "sample_sequence" not in merged:
+            merged["sample_sequence"] = np.arange(previous_len + fragment_len)
+        ticks = np.asarray(merged.get("session_tick", np.zeros(previous_len + fragment_len)))
+        epochs = np.asarray(merged["capture_epoch"], dtype=int)
+        identity = np.rec.fromarrays((epochs, ticks), names=("epoch", "tick"))
         _, unique = np.unique(identity, return_index=True)
-        order = unique[np.argsort(np.asarray(merged["session_time"])[unique])]
+        sequence = np.asarray(merged["sample_sequence"])
+        order = unique[np.lexsort((sequence[unique], epochs[unique]))]
         merged = {key: values[order] for key, values in merged.items()}
         metadata = dict(previous.metadata)
         metadata.update(fragment.metadata)
         return TelemetryRun(merged, metadata)
+
+    def _reanalyze_outdated(self) -> None:
+        rows = self.connection.execute(
+            "SELECT id, telemetry_path, report_json FROM sessions WHERE status = 'ready'",
+        ).fetchall()
+        for row in rows:
+            try:
+                current = AnalysisReport.model_validate_json(row["report_json"]) if row["report_json"] else None
+                if current and current.analysis_version >= ANALYSIS_VERSION:
+                    continue
+                path = Path(row["telemetry_path"])
+                if not path.exists():
+                    continue
+                with np.load(path, allow_pickle=False) as data:
+                    samples = {key: data[key] for key in data.files if not key.startswith("meta_")}
+                    metadata = {
+                        key[5:]: str(data[key].item())
+                        for key in data.files if key.startswith("meta_")
+                    }
+                report = analyze(TelemetryRun(samples, metadata), row["id"])
+                self.connection.execute(
+                    "UPDATE sessions SET report_json=?, error=NULL WHERE id=?",
+                    (report.model_dump_json(), row["id"]),
+                )
+            except (OSError, ValueError):
+                self.connection.execute(
+                    "UPDATE sessions SET status='failed', error=? WHERE id=?",
+                    ("Telemetry recovery failed", row["id"]),
+                )
+        self.connection.commit()
 
     def list(self) -> list[SessionListItem]:
         rows = self.connection.execute("SELECT * FROM sessions ORDER BY created_at DESC").fetchall()

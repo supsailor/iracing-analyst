@@ -13,6 +13,7 @@ CHANNELS = (
     "track_surface", "incidents", "session_num", "session_state", "session_unique_id",
     "session_tick", "is_on_track_car", "enter_exit_reset", "latitude", "longitude",
     "altitude", "yaw_north", "velocity_x", "velocity_y",
+    "capture_epoch", "sample_sequence",
 )
 
 
@@ -162,6 +163,9 @@ class LapSummary(BaseModel):
     incident_events: list[IncidentEvent] = Field(default_factory=list)
     badges: list[str] = Field(default_factory=list)
     display_type: Literal["lap", "out_lap", "in_lap", "pit", "incomplete"] = "lap"
+    lap_instance_id: str = ""
+    iracing_lap_number: int | None = None
+    data_quality_reasons: list[str] = Field(default_factory=list)
 
 
 class AnalysisReport(BaseModel):
@@ -192,6 +196,9 @@ class AnalysisReport(BaseModel):
     data_sufficiency: DataSufficiency = Field(default_factory=lambda: DataSufficiency(
         status="insufficient", valid_laps=0, message_key="data.insufficient",
     ))
+    analysis_version: int = 1
+    data_quality_status: Literal["ok", "recovered", "corrupted"] = "ok"
+    data_quality_reasons: list[str] = Field(default_factory=list)
 
 
 class SessionListItem(BaseModel):

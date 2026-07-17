@@ -136,6 +136,9 @@ class LiveCollector:
         finalized = False
         active_key: str | None = None
         disconnected_at: float | None = None
+        was_disconnected = False
+        capture_epoch = 0
+        sample_sequence = 0
 
         def flush() -> None:
             nonlocal collected
@@ -150,6 +153,7 @@ class LiveCollector:
             available = bool(sdk.startup())
             self.connected = available
             if not available:
+                was_disconnected = True
                 if disconnected_at is None:
                     disconnected_at = time.monotonic()
                 if time.monotonic() - disconnected_at >= 15 and collected["session_time"]:
@@ -159,6 +163,9 @@ class LiveCollector:
                 time.sleep(1.0)
                 continue
             disconnected_at = None
+            if was_disconnected:
+                capture_epoch += 1
+                was_disconnected = False
             session_state = sdk["SessionState"]
             session_num = sdk["SessionNum"]
             session_unique_id = sdk["SessionUniqueID"]
@@ -170,6 +177,7 @@ class LiveCollector:
             if active_key is not None and current_key != active_key:
                 flush()
                 finalized = False
+                capture_epoch += 1
             active_key = current_key
             sessions = (sdk["SessionInfo"] or {}).get("Sessions", [])
             current_session = next((item for item in sessions if item.get("SessionNum") == session_num), {})
@@ -205,6 +213,9 @@ class LiveCollector:
                 for target, source in VARIABLE_ALIASES.items():
                     value = sdk[source]
                     collected[target].append(0 if value is None else value)
+                collected["capture_epoch"].append(capture_epoch)
+                collected["sample_sequence"].append(sample_sequence)
+                sample_sequence += 1
             except (AttributeError, IndexError, TypeError):
                 pass
             finally:

@@ -16,6 +16,7 @@ from .track_catalog import catalog_for
 
 
 GRID_SIZE = 1200
+ANALYSIS_VERSION = 2
 
 
 @dataclass(slots=True)
@@ -32,6 +33,9 @@ class NormalizedLap:
     out_lap: bool = False
     in_lap: bool = False
     incidents: list[IncidentEvent] | None = None
+    iracing_number: int | None = None
+    instance_id: str = ""
+    quality_reasons: list[str] | None = None
 
 
 def _as_float(run: TelemetryRun, key: str, default: float = 0.0) -> np.ndarray:
@@ -40,6 +44,46 @@ def _as_float(run: TelemetryRun, key: str, default: float = 0.0) -> np.ndarray:
     if value is None:
         return np.full(reference.shape, default, dtype=float)
     return np.asarray(value, dtype=float)
+
+
+def _capture_epochs(run: TelemetryRun) -> tuple[list[np.ndarray], list[str]]:
+    """Restore acquisition streams without trusting overlapping SessionTime ranges."""
+    time = _as_float(run, "session_time")
+    tick = _as_float(run, "session_tick")
+    reasons: list[str] = []
+    if "capture_epoch" in run.samples:
+        labels = _as_float(run, "capture_epoch").astype(int)
+    elif str(run.metadata.get("source", "")) == "live" and tick.size and np.ptp(tick) > 0:
+        # SessionTime and SessionTick advance together. A reconnect changes their offset.
+        offset = time - tick / 60.0
+        order = np.argsort(offset)
+        labels = np.zeros(len(time), dtype=int)
+        epoch = 0
+        previous = float(offset[order[0]])
+        for index in order:
+            value = float(offset[index])
+            if value - previous > 2.0:
+                epoch += 1
+            labels[index] = epoch
+            previous = value
+        if epoch:
+            reasons.append("overlapping_capture")
+    else:
+        labels = np.zeros(len(time), dtype=int)
+    if "sample_sequence" in run.samples:
+        sequence = _as_float(run, "sample_sequence")
+    elif str(run.metadata.get("source", "")) == "live":
+        sequence = tick
+    else:
+        sequence = np.arange(len(time), dtype=float)
+    epochs = []
+    for label in np.unique(labels):
+        indices = np.flatnonzero(labels == label)
+        indices = indices[np.argsort(sequence[indices], kind="stable")]
+        if indices.size:
+            epochs.append(indices)
+    epochs.sort(key=lambda indices: float(np.min(time[indices])))
+    return epochs, reasons
 
 
 def normalize_laps(run: TelemetryRun) -> list[NormalizedLap]:
@@ -55,26 +99,55 @@ def normalize_laps(run: TelemetryRun) -> list[NormalizedLap]:
     ]
     grid = np.linspace(0.0, 1.0, GRID_SIZE, endpoint=False)
     result: list[NormalizedLap] = []
-    for number in sorted(set(lap_no.tolist())):
-        mask = lap_no == number
-        # Preserve lap 0 and short terminal fragments for classification in the lap table.
-        if number < 0 or mask.sum() < 8:
+    epochs, recovery_reasons = _capture_epochs(run)
+    instances: list[tuple[np.ndarray, int]] = []
+    for epoch_indices in epochs:
+        if epoch_indices.size < 2:
             continue
-        indices = np.flatnonzero(mask)
+        split = np.flatnonzero(
+            (np.diff(lap_no[epoch_indices]) != 0)
+            | (np.diff(dist[epoch_indices]) < -0.5)
+        ) + 1
+        for indices in np.split(epoch_indices, split):
+            if indices.size >= 8 and lap_no[indices[0]] >= 0:
+                instances.append((indices, int(lap_no[indices[0]])))
+    duplicate_numbers = len({number for _, number in instances}) < len(instances)
+    if duplicate_numbers:
+        recovery_reasons.append("reused_lap_number")
+    used_numbers: set[int] = set()
+    next_number = max((number for _, number in instances), default=0) + 1
+    for instance_index, (acquisition_indices, iracing_number) in enumerate(instances):
+        if iracing_number not in used_numbers:
+            number = iracing_number
+        else:
+            number = next_number
+            next_number += 1
+        used_numbers.add(number)
+        indices = acquisition_indices
+        quality = list(recovery_reasons)
+        elapsed_raw = time[indices] - time[indices[0]]
+        if np.any(np.diff(elapsed_raw) < -2.0):
+            quality.append("non_monotonic_elapsed")
+        elapsed_raw = np.maximum.accumulate(elapsed_raw)
+        elapsed_lookup = {int(index): value for index, value in zip(indices, elapsed_raw, strict=True)}
         lap_dist = dist[indices]
         order = np.argsort(lap_dist)
         indices, lap_dist = indices[order], lap_dist[order]
         unique_dist, unique_index = np.unique(lap_dist, return_index=True)
         indices = indices[unique_index]
         coverage = float(unique_dist[-1] - unique_dist[0]) if unique_dist.size else 0
-        duration = float(time[indices[-1]] - time[indices[0]])
+        duration = float(time[acquisition_indices[-1]] - time[acquisition_indices[0]])
         has_pit = bool(pit[indices].any())
-        out_lap = number == 0 or (bool(pit[indices[0]]) and not bool(pit[indices[-1]]))
-        in_lap = not bool(pit[indices[0]]) and bool(pit[indices[-1]])
+        out_lap = iracing_number == 0 or (
+            bool(pit[acquisition_indices[0]]) and not bool(pit[acquisition_indices[-1]])
+        )
+        in_lap = not bool(pit[acquisition_indices[0]]) and bool(pit[acquisition_indices[-1]])
         missing = coverage < 0.94 or unique_dist.size < 120
         stopped = duration <= 0 or bool(np.mean(_as_float(run, "speed")[indices] < 1.0) > 0.08)
         # A completed incident lap remains analytically useful. Pit/out/in and incomplete laps do not.
-        valid = number > 0 and not (has_pit or missing or stopped or out_lap or in_lap)
+        valid = iracing_number > 0 and not (
+            has_pit or missing or stopped or out_lap or in_lap or "non_monotonic_elapsed" in quality
+        )
         reason = "pit" if has_pit else "missing_data" if missing else "stopped" if stopped else (
             None
         )
@@ -82,21 +155,25 @@ def normalize_laps(run: TelemetryRun) -> list[NormalizedLap]:
         for channel in channels:
             raw = _as_float(run, channel)[indices]
             values[channel] = np.interp(grid, unique_dist, raw)
-        values["elapsed"] = np.interp(grid, unique_dist, time[indices] - time[indices[0]])
-        incident_values = _as_float(run, "incidents")[indices]
+        values["elapsed"] = np.interp(
+            grid, unique_dist, np.asarray([elapsed_lookup[int(index)] for index in indices]),
+        )
+        incident_values = _as_float(run, "incidents")[acquisition_indices]
         changes = np.diff(incident_values, prepend=incident_values[0])
         events: list[IncidentEvent] = []
-        for event_index in np.flatnonzero(changes > 0):
+        for event_index in np.flatnonzero(np.isin(changes, (1, 2, 4))):
             points = int(round(changes[event_index]))
-            near = indices[max(0, event_index - 3):event_index + 4]
+            raw_index = acquisition_indices[event_index]
+            near = acquisition_indices[max(0, event_index - 3):event_index + 4]
             likely_off = bool(np.any(surface[near] == 0))
             events.append(IncidentEvent(
-                lap=number, points=points, distance_pct=float(dist[indices[event_index]]),
+                lap=number, points=points, distance_pct=float(dist[raw_index]),
                 likely_off_track=likely_off,
                 label=(f"probable off-track {points}x" if likely_off else f"incident {points}x"),
             ))
         result.append(NormalizedLap(
             number, duration, grid, values, valid, valid, reason, coverage, has_pit, out_lap, in_lap, events,
+            iracing_number, f"lap-{instance_index}", quality,
         ))
 
     valid_times = np.array([lap.time for lap in result if lap.valid])
@@ -179,8 +256,9 @@ def _segment_time(lap: NormalizedLap, a: int, b: int) -> float:
     elapsed = lap.values["elapsed"]
     if b >= len(elapsed):
         tail = lap.time - float(elapsed[a])
-        return max(tail, 0.0)
-    return max(float(elapsed[b] - elapsed[a]), 0.0)
+        return tail if np.isfinite(tail) and tail > 0 else float("nan")
+    value = float(elapsed[b] - elapsed[a])
+    return value if np.isfinite(value) and value > 0 else float("nan")
 
 
 def _metrics(lap: NormalizedLap, a: int, b: int) -> dict[str, float | int | None]:
@@ -446,6 +524,8 @@ def _lap_summaries(laps: list[NormalizedLap], best: NormalizedLap | None, median
             reason=lap.reason, delta_to_best=(lap.time - best.time if best else None), coverage=lap.coverage,
             incident_points=points, incident_events=events, badges=badges,
             display_type=display_type,
+            lap_instance_id=lap.instance_id, iracing_lap_number=lap.iracing_number,
+            data_quality_reasons=lap.quality_reasons or [],
         ))
     return result
 
@@ -473,6 +553,8 @@ def analyze(run: TelemetryRun, session_id: str | None = None) -> AnalysisReport:
             session_type=session_type, layout=layout, track_id=optional_int("track_id"),
             official_turns=optional_int("official_turns"), stints=detect_stints(run),
             data_sufficiency=DataSufficiency(status="insufficient", valid_laps=0, message_key="data.noValidLaps"),
+            analysis_version=ANALYSIS_VERSION, data_quality_status="corrupted",
+            data_quality_reasons=["no_valid_laps"],
         )
     best = min(valid, key=lambda x: x.time)
     pool = representative or valid
@@ -482,13 +564,20 @@ def analyze(run: TelemetryRun, session_id: str | None = None) -> AnalysisReport:
     track_length = _track_length_m(run.metadata)
     segments: list[SegmentMetrics] = []
     sector_optimal = 0.0
+    quality_reasons = sorted({reason for lap in laps for reason in (lap.quality_reasons or [])})
+    optimal_valid = True
     for index, (a, b, confidence, segment_name) in enumerate(detected, 1):
         times = [(lap, _segment_time(lap, a, b)) for lap in pool]
-        source, best_segment_time = min(times, key=lambda item: item[1])
+        finite_times = [(lap, value) for lap, value in times if np.isfinite(value) and value > 0.02]
+        if not finite_times:
+            optimal_valid = False
+            quality_reasons.append("invalid_segment_time")
+            continue
+        source, best_segment_time = min(finite_times, key=lambda item: item[1])
         selected_time = _segment_time(best, a, b)
         median_selected_time = _segment_time(median, a, b)
         source_metrics = _metrics(source, a, b)
-        time_values = np.array([value for _, value in times])
+        time_values = np.array([value for _, value in finite_times])
         sector_optimal += best_segment_time
         segments.append(SegmentMetrics(
             id=f"segment-{index}", name=segment_name, start_pct=a / GRID_SIZE, end_pct=b / GRID_SIZE,
@@ -503,9 +592,25 @@ def analyze(run: TelemetryRun, session_id: str | None = None) -> AnalysisReport:
             best_vs_median=_corner_comparison(best, median, a, b, track_length),
             best_vs_optimal_segment=_corner_comparison(best, source, a, b, track_length),
         ))
-    confidence = min(1.0, len(representative) / 5) * float(np.mean([s.confidence for s in segments]))
+    expected_segment_count = len(detected)
+    if len(segments) != expected_segment_count:
+        optimal_valid = False
+    for lap in pool:
+        total = sum(_segment_time(lap, a, b) for a, b, _, _ in detected)
+        if not np.isfinite(total) or abs(total - lap.time) > 0.05:
+            optimal_valid = False
+            quality_reasons.append("segment_sum_mismatch")
+            break
+    if optimal_valid:
+        potential = best.time - sector_optimal
+        if potential < -0.01 or potential > best.time * 0.15:
+            optimal_valid = False
+            quality_reasons.append("implausible_potential")
+    confidence = min(1.0, len(representative) / 5) * float(
+        np.mean([s.confidence for s in segments]) if segments else 0
+    )
     enough_data = len(valid) >= 3
-    recommendations = build_recommendations(segments) if enough_data else []
+    recommendations = build_recommendations(segments) if enough_data and optimal_valid else []
     insights = build_insights(segments, median, len(valid))
     sufficiency = DataSufficiency(
         status="ready" if len(valid) >= 5 else "limited" if enough_data else "insufficient",
@@ -520,8 +625,8 @@ def analyze(run: TelemetryRun, session_id: str | None = None) -> AnalysisReport:
         laps=_lap_summaries(laps, best, median if enough_data else None),
         best_lap=best.number, best_time=best.time,
         median_lap=median.number if enough_data else None, median_time=median.time if enough_data else None,
-        sector_optimal=sector_optimal if enough_data else None,
-        potential_gap=max(0, best.time - sector_optimal) if enough_data else None,
+        sector_optimal=sector_optimal if enough_data and optimal_valid else None,
+        potential_gap=max(0, best.time - sector_optimal) if enough_data and optimal_valid else None,
         segments=segments, recommendations=recommendations, confidence=confidence,
         session_type=session_type, layout=layout, track_id=optional_int("track_id"),
         official_turns=optional_int("official_turns"), stints=detect_stints(run),
@@ -531,6 +636,11 @@ def analyze(run: TelemetryRun, session_id: str | None = None) -> AnalysisReport:
             best, median, segments, insights,
             [event for lap in laps for event in (lap.incidents or [])],
         ),
+        analysis_version=ANALYSIS_VERSION,
+        data_quality_status=(
+            "corrupted" if not optimal_valid else "recovered" if quality_reasons else "ok"
+        ),
+        data_quality_reasons=sorted(set(quality_reasons)),
     )
 
 
