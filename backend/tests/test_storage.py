@@ -3,6 +3,7 @@ from iracing_analyst.storage import SessionStore
 from iracing_analyst.models import TelemetryRun
 import numpy as np
 import sqlite3
+import json
 
 
 def test_round_trip(tmp_path):
@@ -54,3 +55,25 @@ def test_existing_database_is_migrated_without_deleting_rows(tmp_path):
 
     columns = {row[1] for row in store.connection.execute("PRAGMA table_info(sessions)")}
     assert {"session_key", "session_type", "layout"} <= columns
+
+
+def test_old_report_is_automatically_reanalyzed_without_rewriting_npz(tmp_path):
+    initial = SessionStore(tmp_path)
+    report = initial.add(synthetic_run(), "fixture")
+    telemetry_path = initial.connection.execute(
+        "SELECT telemetry_path FROM sessions WHERE id=?", (report.session_id,),
+    ).fetchone()[0]
+    before = open(telemetry_path, "rb").read()
+    old_report = report.model_dump(mode="json")
+    old_report.pop("analysis_version")
+    initial.connection.execute(
+        "UPDATE sessions SET report_json=? WHERE id=?",
+        (json.dumps(old_report), report.session_id),
+    )
+    initial.connection.commit()
+    initial.connection.close()
+
+    migrated = SessionStore(tmp_path)
+
+    assert migrated.report(report.session_id).analysis_version == 2
+    assert open(telemetry_path, "rb").read() == before

@@ -115,6 +115,39 @@ def test_incident_lap_is_marked_and_remains_valid():
     assert report.track_map.incidents
 
 
+def test_overlapping_live_capture_epochs_do_not_create_zero_segments():
+    first = synthetic_run(3)
+    second = synthetic_run(5)
+    for run, offset in ((first, 100.0), (second, 120.0)):
+        tick = np.asarray(run.samples["session_tick"], dtype=float)
+        run.samples["session_time"] = tick / 60.0 + offset
+        run.metadata["source"] = "live"
+    # Simulate the v0.2.0 merge: overlapping fragments sorted only by SessionTime.
+    keys = set(first.samples) & set(second.samples)
+    samples = {key: np.concatenate((first.samples[key], second.samples[key])) for key in keys}
+    order = np.argsort(samples["session_time"], kind="stable")
+    run = type(first)({key: np.asarray(value)[order] for key, value in samples.items()}, first.metadata)
+
+    report = analyze(run)
+
+    assert report.data_quality_status == "recovered"
+    assert "overlapping_capture" in report.data_quality_reasons
+    assert report.potential_gap is not None
+    assert report.potential_gap < report.best_time * 0.15
+    assert all(segment.best_time > 0 for segment in report.segments)
+    assert len({lap.lap_instance_id for lap in report.laps}) == len(report.laps)
+
+
+def test_impossible_segment_optimal_is_not_exposed(monkeypatch):
+    run = synthetic_run()
+    monkeypatch.setattr("iracing_analyst.analysis._segment_time", lambda *_: 0.0)
+    report = analyze(run)
+    assert report.sector_optimal is None
+    assert report.potential_gap is None
+    assert report.recommendations == []
+    assert report.data_quality_status == "corrupted"
+
+
 def test_pair_comparison_rejects_self_and_has_unique_insights():
     run = synthetic_run()
     comparison = compare_laps(run, 1, 3)

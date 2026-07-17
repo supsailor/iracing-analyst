@@ -45,7 +45,7 @@ iRacing Analyst — локальное приложение для разбор�
 
 ## Установка
 
-1. Откройте [последний релиз](https://github.com/supsailor/iracing-analyst/releases/latest) и скачайте `iracing-analyst-v0.2.0-windows-x64.zip`.
+1. Откройте [последний релиз](https://github.com/supsailor/iracing-analyst/releases/latest) и скачайте `iracing-analyst-v0.2.1-windows-x64.zip`.
 2. Полностью распакуйте архив в постоянную папку.
 3. Запустите `iracing-analyst.exe`, затем iRacing. Локальный отчёт откроется в браузере автоматически.
 
@@ -55,7 +55,7 @@ iRacing Analyst — локальное приложение для разбор�
 
 MVP пока не подписан цифровым сертификатом, поэтому SmartScreen может показать предупреждение о неизвестном издателе. Используйте только архив со страницы Releases этого репозитория и сверяйте SHA-256 checksum.
 
-## Поддерживается в v0.2.0
+## Поддерживается в v0.2.1
 
 - Windows 10/11 x64;
 - road layouts и телеметрия локального пилота;
