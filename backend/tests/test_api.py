@@ -26,6 +26,12 @@ def test_import_and_query(tmp_path, monkeypatch):
         )
         assert telemetry.status_code == 200
         assert len(telemetry.json()["distance_pct"]) == 1200
+        comparison = client.get(
+            f"/api/sessions/{report['session_id']}/comparison",
+            params={"selected_lap": report["best_lap"], "reference_lap": report["median_lap"]},
+        )
+        assert comparison.status_code == 200
+        assert comparison.json()["segments"]
         assert client.delete(f"/api/sessions/{report['session_id']}").status_code == 204
 
 

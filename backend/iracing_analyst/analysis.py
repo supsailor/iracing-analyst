@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -7,8 +8,9 @@ from datetime import datetime, timezone
 import numpy as np
 
 from .models import (
-    AnalysisReport, DataSufficiency, Evidence, Insight, LapSummary, MapPoint, Recommendation,
-    SegmentMetrics, StintSummary, TelemetryRun, TrackMap, TrackMarker,
+    AnalysisReport, CornerComparison, CornerPhaseMetrics, DataSufficiency, Evidence, IncidentEvent,
+    Insight, LapComparison, LapSummary, MapPoint, Recommendation, SegmentMetrics, StintSummary,
+    TelemetryRun, TelemetrySeries, TrackMap, TrackMarker,
 )
 from .track_catalog import catalog_for
 
@@ -25,6 +27,11 @@ class NormalizedLap:
     valid: bool = True
     representative: bool = True
     reason: str | None = None
+    coverage: float = 0
+    has_pit: bool = False
+    out_lap: bool = False
+    in_lap: bool = False
+    incidents: list[IncidentEvent] | None = None
 
 
 def _as_float(run: TelemetryRun, key: str, default: float = 0.0) -> np.ndarray:
@@ -61,19 +68,35 @@ def normalize_laps(run: TelemetryRun) -> list[NormalizedLap]:
         coverage = float(unique_dist[-1] - unique_dist[0]) if unique_dist.size else 0
         duration = float(time[indices[-1]] - time[indices[0]])
         has_pit = bool(pit[indices].any())
+        out_lap = bool(pit[indices[0]]) and not bool(pit[indices[-1]])
+        in_lap = not bool(pit[indices[0]]) and bool(pit[indices[-1]])
         missing = coverage < 0.94 or unique_dist.size < 120
         stopped = duration <= 0 or bool(np.mean(_as_float(run, "speed")[indices] < 1.0) > 0.08)
-        offtrack_share = float(np.mean(surface[indices] == 0))
-        valid = not (has_pit or missing or stopped or offtrack_share > 0.08)
+        # A completed incident lap remains analytically useful. Pit/out/in and incomplete laps do not.
+        valid = not (has_pit or missing or stopped)
         reason = "pit" if has_pit else "missing_data" if missing else "stopped" if stopped else (
-            "off_track" if offtrack_share > 0.08 else None
+            None
         )
         values = {}
         for channel in channels:
             raw = _as_float(run, channel)[indices]
             values[channel] = np.interp(grid, unique_dist, raw)
         values["elapsed"] = np.interp(grid, unique_dist, time[indices] - time[indices[0]])
-        result.append(NormalizedLap(number, duration, grid, values, valid, valid, reason))
+        incident_values = _as_float(run, "incidents")[indices]
+        changes = np.diff(incident_values, prepend=incident_values[0])
+        events: list[IncidentEvent] = []
+        for event_index in np.flatnonzero(changes > 0):
+            points = int(round(changes[event_index]))
+            near = indices[max(0, event_index - 3):event_index + 4]
+            likely_off = bool(np.any(surface[near] == 0))
+            events.append(IncidentEvent(
+                lap=number, points=points, distance_pct=float(dist[indices[event_index]]),
+                likely_off_track=likely_off,
+                label=(f"probable off-track {points}x" if likely_off else f"incident {points}x"),
+            ))
+        result.append(NormalizedLap(
+            number, duration, grid, values, valid, valid, reason, coverage, has_pit, out_lap, in_lap, events,
+        ))
 
     valid_times = np.array([lap.time for lap in result if lap.valid])
     if valid_times.size >= 3:
@@ -174,17 +197,60 @@ def _metrics(lap: NormalizedLap, a: int, b: int) -> dict[str, float | int | None
         return None if value is None else (a + value) / GRID_SIZE
     return {
         "entry": float(speed[0]), "minimum": float(np.min(speed)), "exit": float(speed[-1]),
+        "apex": (a + apex) / GRID_SIZE,
         "brake_start": pct(brake_on), "brake_release": pct(brake_release),
         "throttle_start": pct(throttle_on), "full_throttle": pct(full), "corrections": corrections,
     }
 
 
+def _track_length_m(metadata: dict[str, object]) -> float:
+    raw = str(metadata.get("track_length", metadata.get("TrackLength", "0")))
+    match = re.search(r"[\d.]+", raw)
+    value = float(match.group()) if match else 0.0
+    return value * 1000 if "km" in raw.lower() or value < 20 else value
+
+
+def _phase(metrics: dict[str, float | int | None]) -> CornerPhaseMetrics:
+    return CornerPhaseMetrics(
+        brake_start_pct=metrics["brake_start"], brake_release_pct=metrics["brake_release"],
+        apex_pct=metrics["apex"], minimum_speed_kph=float(metrics["minimum"]),
+        throttle_start_pct=metrics["throttle_start"], full_throttle_pct=metrics["full_throttle"],
+        exit_speed_kph=float(metrics["exit"]), steering_corrections=int(metrics["corrections"]),
+    )
+
+
+def _corner_comparison(
+    selected: NormalizedLap, reference: NormalizedLap, a: int, b: int, track_length: float,
+) -> CornerComparison:
+    chosen, ref = _metrics(selected, a, b), _metrics(reference, a, b)
+    facts: list[str] = []
+    for field, label in (("brake_start", "brake_start"), ("brake_release", "brake_release"),
+                         ("throttle_start", "throttle_start"), ("full_throttle", "full_throttle")):
+        left, right = chosen[field], ref[field]
+        if left is not None and right is not None:
+            delta_m = (float(left) - float(right)) * track_length
+            if abs(delta_m) >= 3:
+                facts.append(f"{label}:{delta_m:+.1f}m")
+    for field, label in (("minimum", "minimum_speed"), ("exit", "exit_speed")):
+        delta = float(chosen[field]) - float(ref[field])
+        if abs(delta) >= 1:
+            facts.append(f"{label}:{delta:+.1f}km/h")
+    correction_delta = int(chosen["corrections"]) - int(ref["corrections"])
+    if correction_delta:
+        facts.append(f"steering_corrections:{correction_delta:+d}")
+    return CornerComparison(
+        selected_lap=selected.number, reference_lap=reference.number,
+        time_delta_s=_segment_time(selected, a, b) - _segment_time(reference, a, b),
+        selected=_phase(chosen), reference=_phase(ref), facts=facts,
+    )
+
+
 def build_recommendations(segments: list[SegmentMetrics]) -> list[Recommendation]:
     recommendations: list[Recommendation] = []
-    for segment in sorted(segments, key=lambda s: s.delta_to_best, reverse=True):
-        if segment.delta_to_best < 0.035 or segment.confidence < 0.5:
+    for segment in sorted(segments, key=lambda s: s.potential_gain_s, reverse=True):
+        if segment.potential_gain_s < 0.035 or segment.confidence < 0.5:
             continue
-        evidence = [Evidence(metric="time_loss", value=segment.delta_to_best, unit="s")]
+        evidence = [Evidence(metric="time_loss", value=segment.potential_gain_s, unit="s")]
         if segment.stability > 0.12:
             rule, title, message = "inconsistent", "rec.inconsistent.title", "rec.inconsistent.message"
             evidence.append(Evidence(metric="time_spread", value=segment.stability, unit="s"))
@@ -201,8 +267,8 @@ def build_recommendations(segments: list[SegmentMetrics]) -> list[Recommendation
             rule, title, message = "segment_loss", "rec.segment.title", "rec.segment.message"
         recommendations.append(Recommendation(
             rule=rule, segment_id=segment.id, title_key=title, message_key=message,
-            confidence=min(segment.confidence, 0.55 + segment.delta_to_best * 2),
-            expected_gain=segment.delta_to_best, evidence=evidence,
+            confidence=min(segment.confidence, 0.55 + segment.potential_gain_s * 2),
+            expected_gain=segment.potential_gain_s, evidence=evidence,
         ))
         if len(recommendations) == 3:
             break
@@ -215,7 +281,7 @@ def build_insights(
     if valid_count < 3:
         return []
     status = "confirmed" if valid_count >= 5 else "probable"
-    insights = []
+    insights: list[Insight] = []
     for segment in segments:
         median_segment_time = _segment_time(
             median_lap, round(segment.start_pct * GRID_SIZE), round(segment.end_pct * GRID_SIZE),
@@ -223,20 +289,32 @@ def build_insights(
         gain = median_segment_time - segment.selected_time
         if gain < 0.025:
             continue
-        channel = "delta"
-        if segment.full_throttle_pct is not None:
-            channel = "throttle"
-        elif segment.brake_release_pct is not None:
-            channel = "brake"
+        comparison = segment.best_vs_median
+        facts = comparison.facts if comparison else []
+        reason, channel = "time", "delta"
+        for candidate, candidate_channel in (("full_throttle", "throttle"), ("throttle_start", "throttle"),
+                                               ("brake_release", "brake"), ("brake_start", "brake"),
+                                               ("minimum_speed", "speed"), ("exit_speed", "speed")):
+            if any(fact.startswith(candidate + ":") for fact in facts):
+                reason, channel = candidate, candidate_channel
+                break
         insights.append(Insight(
             id=f"insight-{segment.id}", kind="positive", status=status,
             segment_id=segment.id, channel=channel,
             distance_pct=(segment.start_pct + segment.end_pct) / 2,
-            title_key="insight.faster.title", message_key="insight.faster.message",
+            title_key=f"insight.{reason}.title", message_key=f"insight.{reason}.message",
+            segment_name=segment.name, reason=reason,
             time_delta=-gain,
-            evidence=[Evidence(metric="time_gain", value=gain, unit="s")],
+            evidence=[Evidence(metric="time_gain", value=gain, unit="s")] + [
+                Evidence(metric=fact.split(":", 1)[0], value=float(fact.split(":", 1)[1][:-1] if fact.endswith("m") else fact.split(":", 1)[1].replace("km/h", "")), unit="m" if fact.endswith("m") else "km/h")
+                for fact in facts if fact.endswith("m") or fact.endswith("km/h")
+            ],
         ))
-    return sorted(insights, key=lambda item: item.time_delta)[:3]
+    selected = sorted(insights, key=lambda item: item.time_delta)[:3]
+    for rank, insight in enumerate(selected, 1):
+        insight.rank = rank
+        insight.marker_id = f"map-insight-{rank}"
+    return selected
 
 
 def detect_stints(run: TelemetryRun) -> list[StintSummary]:
@@ -294,6 +372,7 @@ def _point_at(points: list[MapPoint], distance_pct: float) -> MapPoint | None:
 
 def build_track_map(
     best: NormalizedLap, median: NormalizedLap, segments: list[SegmentMetrics], insights: list[Insight],
+    incidents: list[IncidentEvent] | None = None,
 ) -> TrackMap:
     median_points, source = _trajectory(median)
     best_points, best_source = _trajectory(best)
@@ -309,13 +388,54 @@ def build_track_map(
         point = _point_at(median_points, insight.distance_pct)
         if point:
             markers.append(TrackMarker(
-                label="✓" if insight.kind == "positive" else "!", distance_pct=insight.distance_pct,
+                label=str(insight.rank), distance_pct=insight.distance_pct,
                 x=point.x, y=point.y, insight_id=insight.id,
+            ))
+    incident_markers = []
+    for event in incidents or []:
+        point = _point_at(median_points, event.distance_pct)
+        if point:
+            incident_markers.append(TrackMarker(
+                label=f"{event.points}x", distance_pct=event.distance_pct, x=point.x, y=point.y,
+                insight_id=f"incident-{event.lap}-{event.distance_pct:.4f}",
             ))
     return TrackMap(
         available=True, source=source if source == best_source else source,
-        centerline=median_points, best=best_points, median=median_points, corners=corners, insights=markers,
+        centerline=median_points, best=best_points, median=median_points, corners=corners,
+        insights=markers, incidents=incident_markers,
     )
+
+
+def _lap_summaries(laps: list[NormalizedLap], best: NormalizedLap | None, median: NormalizedLap | None) -> list[LapSummary]:
+    result = []
+    for lap in laps:
+        events = lap.incidents or []
+        points = sum(event.points for event in events)
+        badges: list[str] = []
+        if best and lap.number == best.number:
+            badges.append("best")
+        if median and lap.number == median.number:
+            badges.append("median")
+        if lap.out_lap:
+            badges.append("out_lap")
+        if lap.in_lap:
+            badges.append("in_lap")
+        if lap.has_pit:
+            badges.append("pit")
+        if lap.coverage < 0.94:
+            badges.append("incomplete")
+        if points:
+            badges.append(f"incident_{points}x")
+        elif lap.valid:
+            badges.append("clean")
+        if not lap.valid:
+            badges.append("invalid")
+        result.append(LapSummary(
+            number=lap.number, time=lap.time, valid=lap.valid, representative=lap.representative,
+            reason=lap.reason, delta_to_best=(lap.time - best.time if best else None), coverage=lap.coverage,
+            incident_points=points, incident_events=events, badges=badges,
+        ))
+    return result
 
 
 def analyze(run: TelemetryRun, session_id: str | None = None) -> AnalysisReport:
@@ -335,7 +455,7 @@ def analyze(run: TelemetryRun, session_id: str | None = None) -> AnalysisReport:
             session_id=session_id, track=str(run.metadata.get("track", "Unknown track")),
             car=str(run.metadata.get("car", "Unknown car")), created_at=datetime.now(timezone.utc),
             sample_count=len(_as_float(run, "session_time")),
-            laps=[LapSummary(number=x.number, time=x.time, valid=x.valid, representative=x.representative, reason=x.reason) for x in laps],
+            laps=_lap_summaries(laps, None, None),
             best_lap=None, best_time=None, median_lap=None, median_time=None, sector_optimal=None,
             potential_gap=None, segments=[], recommendations=[], confidence=0.0,
             session_type=session_type, layout=layout, track_id=optional_int("track_id"),
@@ -347,24 +467,29 @@ def analyze(run: TelemetryRun, session_id: str | None = None) -> AnalysisReport:
     median_value = float(np.median([lap.time for lap in pool]))
     median = min(pool, key=lambda x: abs(x.time - median_value))
     detected = report_segments(run, laps)
+    track_length = _track_length_m(run.metadata)
     segments: list[SegmentMetrics] = []
     sector_optimal = 0.0
     for index, (a, b, confidence, segment_name) in enumerate(detected, 1):
         times = [(lap, _segment_time(lap, a, b)) for lap in pool]
         source, best_segment_time = min(times, key=lambda item: item[1])
         selected_time = _segment_time(best, a, b)
+        median_selected_time = _segment_time(median, a, b)
         source_metrics = _metrics(source, a, b)
         time_values = np.array([value for _, value in times])
         sector_optimal += best_segment_time
         segments.append(SegmentMetrics(
             id=f"segment-{index}", name=segment_name, start_pct=a / GRID_SIZE, end_pct=b / GRID_SIZE,
             confidence=confidence, best_time=best_segment_time, median_time=float(np.median(time_values)),
-            selected_time=selected_time, delta_to_best=max(0, selected_time - best_segment_time),
+            selected_time=selected_time, gain_vs_median_s=median_selected_time - selected_time,
+            potential_gain_s=max(0, selected_time - best_segment_time),
             stability=float(np.median(np.abs(time_values - np.median(time_values)))), source_lap=source.number,
             entry_speed_kph=source_metrics["entry"], minimum_speed_kph=source_metrics["minimum"],
             exit_speed_kph=source_metrics["exit"], brake_start_pct=source_metrics["brake_start"],
             brake_release_pct=source_metrics["brake_release"], throttle_start_pct=source_metrics["throttle_start"],
             full_throttle_pct=source_metrics["full_throttle"], steering_corrections=source_metrics["corrections"],
+            best_vs_median=_corner_comparison(best, median, a, b, track_length),
+            best_vs_optimal_segment=_corner_comparison(best, source, a, b, track_length),
         ))
     confidence = min(1.0, len(representative) / 5) * float(np.mean([s.confidence for s in segments]))
     enough_data = len(valid) >= 3
@@ -380,7 +505,7 @@ def analyze(run: TelemetryRun, session_id: str | None = None) -> AnalysisReport:
         session_id=session_id, track=str(run.metadata.get("track", "Unknown track")),
         car=str(run.metadata.get("car", "Unknown car")), created_at=datetime.now(timezone.utc),
         sample_count=len(_as_float(run, "session_time")),
-        laps=[LapSummary(number=x.number, time=x.time, valid=x.valid, representative=x.representative, reason=x.reason) for x in laps],
+        laps=_lap_summaries(laps, best, median if enough_data else None),
         best_lap=best.number, best_time=best.time,
         median_lap=median.number if enough_data else None, median_time=median.time if enough_data else None,
         sector_optimal=sector_optimal if enough_data else None,
@@ -390,7 +515,10 @@ def analyze(run: TelemetryRun, session_id: str | None = None) -> AnalysisReport:
         official_turns=optional_int("official_turns"), stints=detect_stints(run),
         insights=insights, strengths=insights, improvement_actions=recommendations,
         data_sufficiency=sufficiency,
-        track_map=build_track_map(best, median, segments, insights),
+        track_map=build_track_map(
+            best, median, segments, insights,
+            [event for lap in laps for event in (lap.incidents or [])],
+        ),
     )
 
 
@@ -403,3 +531,38 @@ def telemetry_for_laps(run: TelemetryRun, selected_number: int, reference_number
     selected_data["delta"] = (selected.values["elapsed"] - reference.values["elapsed"]).tolist()
     reference_data["delta"] = np.zeros(GRID_SIZE).tolist()
     return {"distance_pct": selected.grid.tolist(), "selected": selected_data, "reference": reference_data}
+
+
+def compare_laps(run: TelemetryRun, selected_number: int, reference_number: int) -> LapComparison:
+    if selected_number == reference_number:
+        raise ValueError("A lap cannot be compared with itself")
+    laps = normalize_laps(run)
+    by_number = {lap.number: lap for lap in laps}
+    selected, reference = by_number[selected_number], by_number[reference_number]
+    detected = report_segments(run, laps)
+    track_length = _track_length_m(run.metadata)
+    segments: list[SegmentMetrics] = []
+    for index, (a, b, confidence, name) in enumerate(detected, 1):
+        selected_metrics = _metrics(selected, a, b)
+        reference_time = _segment_time(reference, a, b)
+        selected_time = _segment_time(selected, a, b)
+        comparison = _corner_comparison(selected, reference, a, b, track_length)
+        segments.append(SegmentMetrics(
+            id=f"segment-{index}", name=name, start_pct=a / GRID_SIZE, end_pct=b / GRID_SIZE,
+            confidence=confidence, best_time=min(selected_time, reference_time), median_time=reference_time,
+            selected_time=selected_time, gain_vs_median_s=reference_time - selected_time,
+            potential_gain_s=max(0, selected_time - reference_time), stability=0,
+            source_lap=reference.number, entry_speed_kph=float(selected_metrics["entry"]),
+            minimum_speed_kph=float(selected_metrics["minimum"]), exit_speed_kph=float(selected_metrics["exit"]),
+            brake_start_pct=selected_metrics["brake_start"], brake_release_pct=selected_metrics["brake_release"],
+            throttle_start_pct=selected_metrics["throttle_start"], full_throttle_pct=selected_metrics["full_throttle"],
+            steering_corrections=int(selected_metrics["corrections"]), best_vs_median=comparison,
+            best_vs_optimal_segment=comparison,
+        ))
+    insights = build_insights(segments, reference, max(3, len([lap for lap in laps if lap.valid])))
+    return LapComparison(
+        selected_lap=selected_number, reference_lap=reference_number,
+        telemetry=TelemetrySeries(**telemetry_for_laps(run, selected_number, reference_number)),
+        track_map=build_track_map(selected, reference, segments, insights, selected.incidents),
+        segments=segments, insights=insights,
+    )

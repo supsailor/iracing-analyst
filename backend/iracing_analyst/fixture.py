@@ -63,6 +63,7 @@ def synthetic_run(laps: int = 6, samples_per_lap: int = 1200) -> TelemetryRun:
             "source": "fixture", "track": "Synthetic Road Course", "car": "Synthetic GT",
             "session_type": "Practice", "session_num": 0, "subsession_id": 4242,
             "session_key": "4242:0:0", "layout": "Full Course", "official_turns": 4,
+            "track_length": "5.2 km",
         },
     )
 

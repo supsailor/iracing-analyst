@@ -39,6 +39,26 @@ class Recommendation(BaseModel):
     evidence: list[Evidence]
 
 
+class CornerPhaseMetrics(BaseModel):
+    brake_start_pct: float | None = None
+    brake_release_pct: float | None = None
+    apex_pct: float | None = None
+    minimum_speed_kph: float
+    throttle_start_pct: float | None = None
+    full_throttle_pct: float | None = None
+    exit_speed_kph: float
+    steering_corrections: int
+
+
+class CornerComparison(BaseModel):
+    selected_lap: int
+    reference_lap: int
+    time_delta_s: float
+    selected: CornerPhaseMetrics
+    reference: CornerPhaseMetrics
+    facts: list[str] = Field(default_factory=list)
+
+
 class Insight(BaseModel):
     id: str
     kind: Literal["positive", "attention", "warning"]
@@ -49,6 +69,10 @@ class Insight(BaseModel):
     title_key: str
     message_key: str
     time_delta: float = 0
+    segment_name: str = ""
+    reason: str = "time"
+    rank: int = 0
+    marker_id: str = ""
     evidence: list[Evidence] = Field(default_factory=list)
 
 
@@ -74,6 +98,7 @@ class TrackMap(BaseModel):
     median: list[MapPoint] = Field(default_factory=list)
     corners: list[TrackMarker] = Field(default_factory=list)
     insights: list[TrackMarker] = Field(default_factory=list)
+    incidents: list[TrackMarker] = Field(default_factory=list)
 
 
 class StintSummary(BaseModel):
@@ -100,7 +125,8 @@ class SegmentMetrics(BaseModel):
     best_time: float
     median_time: float
     selected_time: float
-    delta_to_best: float
+    gain_vs_median_s: float = 0
+    potential_gain_s: float = 0
     stability: float
     source_lap: int
     entry_speed_kph: float
@@ -111,6 +137,16 @@ class SegmentMetrics(BaseModel):
     throttle_start_pct: float | None = None
     full_throttle_pct: float | None = None
     steering_corrections: int = 0
+    best_vs_median: CornerComparison | None = None
+    best_vs_optimal_segment: CornerComparison | None = None
+
+
+class IncidentEvent(BaseModel):
+    lap: int
+    points: int
+    distance_pct: float
+    likely_off_track: bool = False
+    label: str
 
 
 class LapSummary(BaseModel):
@@ -119,6 +155,12 @@ class LapSummary(BaseModel):
     valid: bool
     representative: bool
     reason: str | None = None
+    delta_to_best: float | None = None
+    stint: int = 1
+    coverage: float = 0
+    incident_points: int = 0
+    incident_events: list[IncidentEvent] = Field(default_factory=list)
+    badges: list[str] = Field(default_factory=list)
 
 
 class AnalysisReport(BaseModel):
@@ -176,3 +218,12 @@ class TelemetrySeries(BaseModel):
     distance_pct: list[float]
     selected: dict[str, list[float]]
     reference: dict[str, list[float]]
+
+
+class LapComparison(BaseModel):
+    selected_lap: int
+    reference_lap: int
+    telemetry: TelemetrySeries
+    track_map: TrackMap
+    segments: list[SegmentMetrics]
+    insights: list[Insight]

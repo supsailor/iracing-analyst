@@ -1,6 +1,6 @@
 import numpy as np
 
-from iracing_analyst.analysis import analyze, normalize_laps, telemetry_for_laps
+from iracing_analyst.analysis import analyze, compare_laps, normalize_laps, telemetry_for_laps
 from iracing_analyst.fixture import synthetic_run
 
 
@@ -70,3 +70,40 @@ def test_spa_uses_official_corner_catalog():
     assert len(report.segments) == 19
     assert report.segments[0].name == "La Source"
     assert report.segments[-1].name == "Bus Stop 2"
+
+
+def test_segment_best_vs_median_deltas_sum_to_lap_delta():
+    report = analyze(synthetic_run())
+    expected = report.median_time - report.best_time
+    assert abs(sum(segment.gain_vs_median_s for segment in report.segments) - expected) < 0.01
+    assert all(segment.potential_gain_s >= 0 for segment in report.segments)
+
+
+def test_incident_lap_is_marked_and_remains_valid():
+    run = synthetic_run()
+    mask = (run.samples["lap"] == 2) & (run.samples["lap_dist_pct"] >= 0.4)
+    run.samples["incidents"][mask] = 1
+    run.samples["track_surface"][mask & (run.samples["lap_dist_pct"] < 0.41)] = 0
+    report = analyze(run)
+    lap = next(item for item in report.laps if item.number == 2)
+    assert lap.valid
+    assert lap.incident_points == 1
+    assert "incident_1x" in lap.badges
+    assert lap.incident_events[0].likely_off_track
+    assert report.track_map.incidents
+
+
+def test_pair_comparison_rejects_self_and_has_unique_insights():
+    run = synthetic_run()
+    comparison = compare_laps(run, 1, 3)
+    assert comparison.selected_lap == 1
+    assert comparison.reference_lap == 3
+    assert len(comparison.telemetry.distance_pct) == 1200
+    assert len({item.segment_id for item in comparison.insights}) == len(comparison.insights)
+    assert [item.rank for item in comparison.insights] == list(range(1, len(comparison.insights) + 1))
+    try:
+        compare_laps(run, 1, 1)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("self-comparison must fail")

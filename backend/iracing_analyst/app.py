@@ -10,10 +10,10 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__
-from .analysis import telemetry_for_laps
+from .analysis import compare_laps, telemetry_for_laps
 from .config import data_dir
 from .ingest import IbtReader, LiveCollector, read_npz
-from .models import AnalysisReport, HealthResponse, SessionListItem, TelemetrySeries
+from .models import AnalysisReport, HealthResponse, LapComparison, SessionListItem, TelemetrySeries
 from .storage import SessionStore
 
 
@@ -71,6 +71,19 @@ def telemetry(session_id: str, selected_lap: int, reference_lap: int) -> dict:
         return telemetry_for_laps(run, selected_lap, reference_lap)
     except KeyError as exc:
         raise HTTPException(400, "Lap is unavailable") from exc
+
+
+@app.get("/api/sessions/{session_id}/comparison", response_model=LapComparison)
+def comparison(session_id: str, selected_lap: int, reference_lap: int) -> LapComparison:
+    run = store.run(session_id)
+    if not run:
+        raise HTTPException(404, "Session not found")
+    try:
+        return compare_laps(run, selected_lap, reference_lap)
+    except KeyError as exc:
+        raise HTTPException(400, "Lap is unavailable") from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @app.post("/api/import", response_model=AnalysisReport, status_code=201)
