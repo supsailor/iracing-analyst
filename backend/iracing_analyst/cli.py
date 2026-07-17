@@ -11,7 +11,7 @@ import uvicorn
 
 from .analysis import analyze
 from .app import app
-from .fixture import write_fixture
+from .fixture import write_fixture, write_spa_demo
 from .ingest import IbtReader, read_npz
 
 
@@ -30,6 +30,8 @@ def main() -> None:
     sub = parser.add_subparsers(dest="command")
     generate = sub.add_parser("generate-fixture")
     generate.add_argument("path", type=Path)
+    demo = sub.add_parser("generate-demo")
+    demo.add_argument("path", type=Path)
     analyze_command = sub.add_parser("analyze")
     analyze_command.add_argument("path", type=Path)
     serve = sub.add_parser("serve")
@@ -37,6 +39,10 @@ def main() -> None:
     args = parser.parse_args()
     if args.command == "generate-fixture":
         write_fixture(args.path)
+        print(args.path)
+        return
+    if args.command == "generate-demo":
+        write_spa_demo(args.path)
         print(args.path)
         return
     if args.command == "analyze":

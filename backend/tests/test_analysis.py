@@ -1,7 +1,7 @@
 import numpy as np
 
 from iracing_analyst.analysis import analyze, compare_laps, normalize_laps, telemetry_for_laps
-from iracing_analyst.fixture import synthetic_run
+from iracing_analyst.fixture import spa_demo_run, synthetic_run
 
 
 def test_finds_complete_laps_and_summary():
@@ -81,6 +81,17 @@ def test_spa_uses_official_corner_catalog():
     assert len(report.segments) == 19
     assert report.segments[0].name == "La Source"
     assert report.segments[-1].name == "Bus Stop 2"
+
+
+def test_public_spa_demo_is_deterministic_and_anonymous():
+    first = spa_demo_run()
+    second = spa_demo_run()
+    assert first.metadata["track"] == "Circuit de Spa-Francorchamps"
+    assert first.metadata["official_turns"] == 19
+    assert np.array_equal(first.samples["speed"], second.samples["speed"])
+    serialized = str(first.metadata).lower()
+    assert "pavel" not in serialized
+    assert "user" not in serialized
 
 
 def test_segment_best_vs_median_deltas_sum_to_lap_delta():

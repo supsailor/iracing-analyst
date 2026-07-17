@@ -74,3 +74,60 @@ def write_fixture(path: Path) -> None:
     arrays = {key: np.asarray(value) for key, value in run.samples.items()}
     arrays.update({f"meta_{key}": np.array(str(value)) for key, value in run.metadata.items()})
     np.savez_compressed(path, **arrays)
+
+
+def spa_demo_run() -> TelemetryRun:
+    """Return anonymous, deterministic demonstration data shaped like a Spa-style road layout."""
+    run = synthetic_run()
+    control = np.array([
+        [0, 0], [-120, 70], [-180, 210], [-120, 330], [80, 370], [300, 345],
+        [540, 300], [760, 200], [930, 80], [890, -90], [690, -120], [500, -40],
+        [350, -150], [190, -280], [5, -250], [-95, -125], [-35, -30], [0, 0],
+    ], dtype=float)
+    edge = np.linalg.norm(np.diff(control, axis=0), axis=1)
+    distance = np.concatenate(([0.0], np.cumsum(edge)))
+    distance /= distance[-1]
+    lap_distance = np.asarray(run.samples["lap_dist_pct"], dtype=float)
+    map_x = np.interp(lap_distance, distance, control[:, 0])
+    map_y = np.interp(lap_distance, distance, control[:, 1])
+    phase = lap_distance * 2 * np.pi
+    map_x += 18 * np.sin(phase * 3)
+    map_y += 12 * np.sin(phase * 2)
+    latitude = 50.4372 + map_y / 110_540
+    longitude = 5.9714 + map_x / (111_320 * np.cos(np.radians(50.4372)))
+    run.samples["latitude"] = latitude
+    run.samples["longitude"] = longitude
+    speed = np.asarray(run.samples["speed"], dtype=float).copy()
+    lap_number = np.asarray(run.samples["lap"], dtype=int)
+    specialists = {2: (0.37, 0.12), 4: (0.65, 0.22), 5: (0.94, 0.52)}
+    for number, (strong_at, penalty_at) in specialists.items():
+        mask = lap_number == number
+        local = lap_distance[mask]
+        speed[mask] += 4.5 * np.exp(-0.5 * ((local - strong_at) / 0.025) ** 2)
+        speed[mask] -= 7.0 * np.exp(-0.5 * ((local - penalty_at) / 0.02) ** 2)
+    run.samples["speed"] = speed
+    session_time = np.empty_like(speed)
+    offset = 0.0
+    for number in sorted(set(lap_number.tolist())):
+        mask = lap_number == number
+        local_speed = np.maximum(speed[mask], 1)
+        dt = (1 / mask.sum()) / local_speed * 5200
+        elapsed = np.cumsum(dt)
+        elapsed -= elapsed[0]
+        session_time[mask] = offset + elapsed
+        offset = float(session_time[mask][-1] + dt[-1])
+    run.samples["session_time"] = session_time
+    run.metadata.update({
+        "track": "Circuit de Spa-Francorchamps", "track_name": "spa",
+        "layout": "Grand Prix", "official_turns": 19, "track_length": "7.004 km",
+        "car": "Porsche 911 GT3 Cup (992)", "source": "fixture",
+    })
+    return run
+
+
+def write_spa_demo(path: Path) -> None:
+    run = spa_demo_run()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    arrays = {key: np.asarray(value) for key, value in run.samples.items()}
+    arrays.update({f"meta_{key}": np.array(str(value)) for key, value in run.metadata.items()})
+    np.savez_compressed(path, **arrays)

@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="360" viewBox="0 0 1280 360" role="img" aria-labelledby="title desc">
+  <title id="title">iRacing Analyst</title>
+  <desc id="desc">Turn telemetry into your next action</desc>
+  <defs>
+    <radialGradient id="glow" cx="72%" cy="15%" r="75%">
+      <stop offset="0" stop-color="#33422a"/><stop offset=".52" stop-color="#111820"/><stop offset="1" stop-color="#090c11"/>
+    </radialGradient>
+    <filter id="soft"><feGaussianBlur stdDeviation="18"/></filter>
+  </defs>
+  <rect width="1280" height="360" rx="22" fill="url(#glow)"/>
+  <path d="M865 76c99-25 243 6 278 77 31 63-57 117-144 112-69-4-119-49-90-87 28-37 91-11 76 24-16 37-100 44-170 25-61-17-118-54-168-27-38 21-22 67 32 85" fill="none" stroke="#303b47" stroke-width="30" stroke-linecap="round" opacity=".75"/>
+  <path d="M865 76c99-25 243 6 278 77 31 63-57 117-144 112-69-4-119-49-90-87 28-37 91-11 76 24-16 37-100 44-170 25-61-17-118-54-168-27-38 21-22 67 32 85" fill="none" stroke="#e8ff47" stroke-width="4" stroke-linecap="round"/>
+  <circle cx="985" cy="202" r="27" fill="#e8ff47" stroke="#090c11" stroke-width="7"/><text x="985" y="210" text-anchor="middle" font-family="Arial,sans-serif" font-weight="800" font-size="22" fill="#090c11">1</text>
+  <g transform="translate(72 66) skewX(-6)"><rect width="74" height="74" rx="10" fill="#e8ff47"/><text x="37" y="50" text-anchor="middle" font-family="Arial,sans-serif" font-weight="900" font-size="34" fill="#090c11">IA</text></g>
+  <text x="72" y="191" font-family="Arial,sans-serif" font-weight="750" font-size="54" fill="#f1f4f7">iRacing Analyst</text>
+  <text x="72" y="241" font-family="Arial,sans-serif" font-size="25" fill="#aeb8c5">Turn telemetry into your next action.</text>
+  <rect x="72" y="278" width="330" height="4" rx="2" fill="#e8ff47"/>
+  <text x="72" y="318" font-family="Arial,sans-serif" font-size="16" letter-spacing="2" fill="#7f8b99">LOCAL · EXPLAINABLE · ACTIONABLE</text>
+</svg>

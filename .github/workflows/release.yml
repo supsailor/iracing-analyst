@@ -1,0 +1,68 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -e "backend[dev]"
+      - name: Verify release version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python -c "import json, os, pathlib, tomllib; expected=os.environ['RELEASE_TAG'].removeprefix('v'); backend=tomllib.loads(pathlib.Path('backend/pyproject.toml').read_text())['project']['version']; frontend=json.loads(pathlib.Path('frontend/package.json').read_text())['version']; assert backend == frontend == expected, (backend, frontend, expected)"
+      - run: pytest backend/tests
+      - run: ruff check backend
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+        working-directory: frontend
+      - run: npm run build
+        working-directory: frontend
+
+  publish:
+    runs-on: windows-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Build portable archive
+        run: powershell -ExecutionPolicy Bypass -File scripts/build_windows.ps1
+      - name: Prepare versioned assets and checksum
+        shell: pwsh
+        run: |
+          $asset = "iracing-analyst-${{ github.ref_name }}-windows-x64.zip"
+          Move-Item "dist/iracing-analyst-windows-x64.zip" "dist/$asset"
+          $hash = (Get-FileHash "dist/$asset" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $asset" | Set-Content "dist/$asset.sha256" -Encoding ascii
+      - name: Publish GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $asset = "iracing-analyst-${{ github.ref_name }}-windows-x64.zip"
+          gh release create "${{ github.ref_name }}" `
+            "dist/$asset" "dist/$asset.sha256" `
+            --repo "${{ github.repository }}" `
+            --title "iRacing Analyst ${{ github.ref_name }} — First public MVP" `
+            --notes-file "docs/releases/${{ github.ref_name }}.md" `
+            --latest
