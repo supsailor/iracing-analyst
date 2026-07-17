@@ -49,6 +49,19 @@ def report(session_id: str) -> AnalysisReport:
     return result
 
 
+@app.delete("/api/sessions/{session_id}", status_code=204)
+def delete_session(session_id: str) -> None:
+    if not store.delete(session_id):
+        raise HTTPException(404, "Session not found")
+
+
+@app.delete("/api/sessions", status_code=200)
+def clear_sessions(confirm: bool = False) -> dict[str, int]:
+    if not confirm:
+        raise HTTPException(400, "Explicit confirmation is required")
+    return {"deleted": store.clear()}
+
+
 @app.get("/api/sessions/{session_id}/telemetry", response_model=TelemetrySeries)
 def telemetry(session_id: str, selected_lap: int, reference_lap: int) -> dict:
     run = store.run(session_id)

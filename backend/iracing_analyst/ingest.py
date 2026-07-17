@@ -23,6 +23,11 @@ VARIABLE_ALIASES = {
     "gear": "Gear", "rpm": "RPM", "long_accel": "LongAccel", "lat_accel": "LatAccel",
     "yaw": "Yaw", "yaw_rate": "YawRate", "on_pit_road": "OnPitRoad",
     "track_surface": "PlayerTrackSurface", "incidents": "PlayerCarMyIncidentCount",
+    "session_num": "SessionNum", "session_state": "SessionState",
+    "session_unique_id": "SessionUniqueID", "session_tick": "SessionTick",
+    "is_on_track_car": "IsOnTrackCar", "enter_exit_reset": "EnterExitReset",
+    "latitude": "Lat", "longitude": "Lon", "altitude": "Alt", "yaw_north": "YawNorth",
+    "velocity_x": "VelocityX", "velocity_y": "VelocityY",
 }
 
 
@@ -80,7 +85,20 @@ class IbtReader:
         metadata = {
             "source": "ibt", "tick_rate": tick_rate, "track": yaml_value("TrackDisplayName", path.stem),
             "car": yaml_value("CarScreenName", "Unknown car"), "original_path": str(path),
+            "track_name": yaml_value("TrackName", ""), "layout": yaml_value("TrackConfigName", ""),
+            "track_id": yaml_value("TrackID", ""), "official_turns": yaml_value("TrackNumTurns", ""),
+            "track_length": yaml_value("TrackLength", ""), "track_north_offset": yaml_value("TrackNorthOffset", ""),
+            "subsession_id": yaml_value("SubSessionID", ""),
         }
+        if "session_num" in samples and len(samples["session_num"]):
+            session_num = int(samples["session_num"][0])
+            metadata["session_num"] = session_num
+            session_pattern = rf"-\s*SessionNum:\s*{session_num}.*?SessionType:\s*(.+?)\s*$"
+            session_match = re.search(session_pattern, session, re.MULTILINE | re.DOTALL)
+            metadata["session_type"] = session_match.group(1).strip() if session_match else "Session"
+        metadata["session_key"] = ":".join(str(metadata.get(key, "")) for key in (
+            "subsession_id", "session_num", "car",
+        ))
         return TelemetryRun(samples=samples, metadata=metadata)
 
 
@@ -116,48 +134,81 @@ class LiveCollector:
         collected: dict[str, list] = {key: [] for key in CHANNELS}
         metadata: dict[str, object] = {"source": "live"}
         finalized = False
+        active_key: str | None = None
+        disconnected_at: float | None = None
+
+        def flush() -> None:
+            nonlocal collected
+            if collected["session_time"]:
+                self.on_complete(TelemetryRun(
+                    samples={key: np.asarray(values) for key, values in collected.items()},
+                    metadata=dict(metadata),
+                ))
+            collected = {key: [] for key in CHANNELS}
+
         while not self._stop.is_set():
             available = bool(sdk.startup())
             self.connected = available
             if not available:
-                if self.recording and collected["session_time"]:
+                if disconnected_at is None:
+                    disconnected_at = time.monotonic()
+                if time.monotonic() - disconnected_at >= 15 and collected["session_time"]:
                     self.recording = False
-                    self.on_complete(TelemetryRun(
-                        samples={k: np.asarray(v) for k, v in collected.items()}, metadata=metadata,
-                    ))
-                    collected = {key: [] for key in CHANNELS}
+                    flush()
                 finalized = False
                 time.sleep(1.0)
                 continue
+            disconnected_at = None
             session_state = sdk["SessionState"]
+            session_num = sdk["SessionNum"]
+            session_unique_id = sdk["SessionUniqueID"]
+            weekend = sdk["WeekendInfo"] or {}
+            driver = sdk["DriverInfo"] or {}
+            driver_index = int(driver.get("DriverCarIdx", 0) or 0)
+            subsession_id = weekend.get("SubSessionID", session_unique_id)
+            current_key = f"{subsession_id}:{session_num}:{driver_index}"
+            if active_key is not None and current_key != active_key:
+                flush()
+                finalized = False
+            active_key = current_key
+            sessions = (sdk["SessionInfo"] or {}).get("Sessions", [])
+            current_session = next((item for item in sessions if item.get("SessionNum") == session_num), {})
+            drivers = driver.get("Drivers", [{}])
+            car = drivers[driver_index].get("CarScreenName", "Unknown car") if driver_index < len(drivers) else "Unknown car"
+            metadata.update({
+                "session_key": current_key, "subsession_id": subsession_id,
+                "session_unique_id": session_unique_id, "session_num": session_num,
+                "session_type": current_session.get("SessionType", "Session"), "driver_car_idx": driver_index,
+                "track": weekend.get("TrackDisplayName", "Unknown track"),
+                "track_name": weekend.get("TrackName", ""), "layout": weekend.get("TrackConfigName", ""),
+                "track_id": weekend.get("TrackID", ""), "official_turns": weekend.get("TrackNumTurns", ""),
+                "track_length": weekend.get("TrackLength", ""), "track_north_offset": weekend.get("TrackNorthOffset", ""),
+                "car": car,
+            })
             checkered = isinstance(session_state, int) and session_state >= 5
             if finalized and not checkered:
                 finalized = False
             if checkered and self.recording and collected["session_time"]:
                 self.recording = False
-                self.on_complete(TelemetryRun(
-                    samples={k: np.asarray(v) for k, v in collected.items()}, metadata=metadata,
-                ))
-                collected = {key: [] for key in CHANNELS}
+                flush()
                 finalized = True
             if checkered or finalized:
                 time.sleep(0.25)
                 continue
-            self.recording = True
+            on_track = sdk["IsOnTrackCar"]
+            self.recording = bool(on_track)
+            if not on_track:
+                time.sleep(0.1)
+                continue
             try:
                 sdk.freeze_var_buffer_latest()
                 for target, source in VARIABLE_ALIASES.items():
                     value = sdk[source]
                     collected[target].append(0 if value is None else value)
-                weekend = sdk["WeekendInfo"] or {}
-                driver = sdk["DriverInfo"] or {}
-                metadata.update({
-                    "track": weekend.get("TrackDisplayName", "Unknown track"),
-                    "car": driver.get("Drivers", [{}])[driver.get("DriverCarIdx", 0)].get("CarScreenName", "Unknown car"),
-                })
             except (AttributeError, IndexError, TypeError):
                 pass
             finally:
                 sdk.unfreeze_var_buffer_latest()
             time.sleep(1 / 60)
+        flush()
         sdk.shutdown()

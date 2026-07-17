@@ -7,8 +7,10 @@ from datetime import datetime, timezone
 import numpy as np
 
 from .models import (
-    AnalysisReport, Evidence, LapSummary, Recommendation, SegmentMetrics, TelemetryRun,
+    AnalysisReport, DataSufficiency, Evidence, Insight, LapSummary, MapPoint, Recommendation,
+    SegmentMetrics, StintSummary, TelemetryRun, TrackMap, TrackMarker,
 )
+from .track_catalog import catalog_for
 
 
 GRID_SIZE = 1200
@@ -41,7 +43,8 @@ def normalize_laps(run: TelemetryRun) -> list[NormalizedLap]:
     surface = _as_float(run, "track_surface", 3)
     channels = [
         "speed", "throttle", "brake", "steering", "gear", "rpm", "long_accel",
-        "lat_accel", "yaw", "yaw_rate", "incidents",
+        "lat_accel", "yaw", "yaw_rate", "incidents", "latitude", "longitude", "altitude",
+        "yaw_north", "velocity_x", "velocity_y", "enter_exit_reset",
     ]
     grid = np.linspace(0.0, 1.0, GRID_SIZE, endpoint=False)
     result: list[NormalizedLap] = []
@@ -131,6 +134,16 @@ def detect_segments(laps: list[NormalizedLap]) -> list[tuple[int, int, float]]:
             for i, (a, b) in enumerate(zip(boundaries, boundaries[1:]))]
 
 
+def report_segments(run: TelemetryRun, laps: list[NormalizedLap]) -> list[tuple[int, int, float, str]]:
+    catalog = catalog_for(run.metadata)
+    if catalog:
+        return [
+            (round(item.start_pct * GRID_SIZE), round(item.end_pct * GRID_SIZE), 1.0, item.name)
+            for item in catalog
+        ]
+    return [(start, end, confidence, f"Zone {index}") for index, (start, end, confidence) in enumerate(detect_segments(laps), 1)]
+
+
 def _crossing(values: np.ndarray, threshold: float, start: int, end: int, rising: bool) -> int | None:
     view = values[start:end]
     mask = view >= threshold if rising else view <= threshold
@@ -196,11 +209,127 @@ def build_recommendations(segments: list[SegmentMetrics]) -> list[Recommendation
     return recommendations
 
 
+def build_insights(
+    segments: list[SegmentMetrics], median_lap: NormalizedLap, valid_count: int,
+) -> list[Insight]:
+    if valid_count < 3:
+        return []
+    status = "confirmed" if valid_count >= 5 else "probable"
+    insights = []
+    for segment in segments:
+        median_segment_time = _segment_time(
+            median_lap, round(segment.start_pct * GRID_SIZE), round(segment.end_pct * GRID_SIZE),
+        )
+        gain = median_segment_time - segment.selected_time
+        if gain < 0.025:
+            continue
+        channel = "delta"
+        if segment.full_throttle_pct is not None:
+            channel = "throttle"
+        elif segment.brake_release_pct is not None:
+            channel = "brake"
+        insights.append(Insight(
+            id=f"insight-{segment.id}", kind="positive", status=status,
+            segment_id=segment.id, channel=channel,
+            distance_pct=(segment.start_pct + segment.end_pct) / 2,
+            title_key="insight.faster.title", message_key="insight.faster.message",
+            time_delta=-gain,
+            evidence=[Evidence(metric="time_gain", value=gain, unit="s")],
+        ))
+    return sorted(insights, key=lambda item: item.time_delta)[:3]
+
+
+def detect_stints(run: TelemetryRun) -> list[StintSummary]:
+    time_values = _as_float(run, "session_time")
+    laps = _as_float(run, "lap").astype(int)
+    if not time_values.size:
+        return []
+    breaks = np.flatnonzero(np.diff(time_values) > 2.0) + 1
+    ranges = np.split(np.arange(len(time_values)), breaks)
+    result = []
+    for index, indices in enumerate(ranges, 1):
+        if indices.size < 2:
+            continue
+        positive_laps = laps[indices][laps[indices] > 0]
+        result.append(StintSummary(
+            index=index, start_time=float(time_values[indices[0]]), end_time=float(time_values[indices[-1]]),
+            first_lap=int(positive_laps.min()) if positive_laps.size else 0,
+            last_lap=int(positive_laps.max()) if positive_laps.size else 0,
+        ))
+    return result
+
+
+def _trajectory(lap: NormalizedLap) -> tuple[list[MapPoint], str]:
+    lat = lap.values["latitude"]
+    lon = lap.values["longitude"]
+    valid_gps = np.ptp(lat) > 1e-7 and np.ptp(lon) > 1e-7
+    if valid_gps:
+        lat0, lon0 = float(lat[0]), float(lon[0])
+        x = (lon - lon0) * 111_320 * np.cos(np.radians(lat0))
+        y = (lat - lat0) * 110_540
+        source = "gps"
+    else:
+        elapsed = lap.values["elapsed"]
+        dt = np.maximum(np.diff(elapsed, prepend=elapsed[0]), 0)
+        heading = lap.values["yaw_north"]
+        vx, vy = lap.values["velocity_x"], lap.values["velocity_y"]
+        world_x = vx * np.cos(heading) - vy * np.sin(heading)
+        world_y = vx * np.sin(heading) + vy * np.cos(heading)
+        x, y = np.cumsum(world_x * dt), np.cumsum(world_y * dt)
+        if np.ptp(x) < 10 or np.ptp(y) < 10:
+            return [], "unavailable"
+        correction = np.linspace(0, 1, GRID_SIZE)
+        x -= correction * (x[-1] - x[0])
+        y -= correction * (y[-1] - y[0])
+        source = "integrated"
+    return [
+        MapPoint(distance_pct=float(lap.grid[index]), x=float(x[index]), y=float(y[index]))
+        for index in range(0, GRID_SIZE, 6)
+    ], source
+
+
+def _point_at(points: list[MapPoint], distance_pct: float) -> MapPoint | None:
+    return min(points, key=lambda point: abs(point.distance_pct - distance_pct)) if points else None
+
+
+def build_track_map(
+    best: NormalizedLap, median: NormalizedLap, segments: list[SegmentMetrics], insights: list[Insight],
+) -> TrackMap:
+    median_points, source = _trajectory(median)
+    best_points, best_source = _trajectory(best)
+    if not median_points:
+        return TrackMap()
+    corners = []
+    for segment in segments:
+        point = _point_at(median_points, segment.start_pct)
+        if point:
+            corners.append(TrackMarker(label=segment.name, distance_pct=segment.start_pct, x=point.x, y=point.y))
+    markers = []
+    for insight in insights:
+        point = _point_at(median_points, insight.distance_pct)
+        if point:
+            markers.append(TrackMarker(
+                label="✓" if insight.kind == "positive" else "!", distance_pct=insight.distance_pct,
+                x=point.x, y=point.y, insight_id=insight.id,
+            ))
+    return TrackMap(
+        available=True, source=source if source == best_source else source,
+        centerline=median_points, best=best_points, median=median_points, corners=corners, insights=markers,
+    )
+
+
 def analyze(run: TelemetryRun, session_id: str | None = None) -> AnalysisReport:
     laps = normalize_laps(run)
     representative = [lap for lap in laps if lap.representative]
     valid = [lap for lap in laps if lap.valid]
     session_id = session_id or uuid.uuid4().hex
+    session_type = str(run.metadata.get("session_type", "Practice"))
+    layout = str(run.metadata.get("layout", ""))
+    def optional_int(key: str) -> int | None:
+        try:
+            return int(str(run.metadata.get(key, "")))
+        except ValueError:
+            return None
     if not valid:
         return AnalysisReport(
             session_id=session_id, track=str(run.metadata.get("track", "Unknown track")),
@@ -209,15 +338,18 @@ def analyze(run: TelemetryRun, session_id: str | None = None) -> AnalysisReport:
             laps=[LapSummary(number=x.number, time=x.time, valid=x.valid, representative=x.representative, reason=x.reason) for x in laps],
             best_lap=None, best_time=None, median_lap=None, median_time=None, sector_optimal=None,
             potential_gap=None, segments=[], recommendations=[], confidence=0.0,
+            session_type=session_type, layout=layout, track_id=optional_int("track_id"),
+            official_turns=optional_int("official_turns"), stints=detect_stints(run),
+            data_sufficiency=DataSufficiency(status="insufficient", valid_laps=0, message_key="data.noValidLaps"),
         )
     best = min(valid, key=lambda x: x.time)
     pool = representative or valid
     median_value = float(np.median([lap.time for lap in pool]))
     median = min(pool, key=lambda x: abs(x.time - median_value))
-    detected = detect_segments(laps)
+    detected = report_segments(run, laps)
     segments: list[SegmentMetrics] = []
     sector_optimal = 0.0
-    for index, (a, b, confidence) in enumerate(detected, 1):
+    for index, (a, b, confidence, segment_name) in enumerate(detected, 1):
         times = [(lap, _segment_time(lap, a, b)) for lap in pool]
         source, best_segment_time = min(times, key=lambda item: item[1])
         selected_time = _segment_time(best, a, b)
@@ -225,7 +357,7 @@ def analyze(run: TelemetryRun, session_id: str | None = None) -> AnalysisReport:
         time_values = np.array([value for _, value in times])
         sector_optimal += best_segment_time
         segments.append(SegmentMetrics(
-            id=f"segment-{index}", name=f"T{index}", start_pct=a / GRID_SIZE, end_pct=b / GRID_SIZE,
+            id=f"segment-{index}", name=segment_name, start_pct=a / GRID_SIZE, end_pct=b / GRID_SIZE,
             confidence=confidence, best_time=best_segment_time, median_time=float(np.median(time_values)),
             selected_time=selected_time, delta_to_best=max(0, selected_time - best_segment_time),
             stability=float(np.median(np.abs(time_values - np.median(time_values)))), source_lap=source.number,
@@ -235,14 +367,30 @@ def analyze(run: TelemetryRun, session_id: str | None = None) -> AnalysisReport:
             full_throttle_pct=source_metrics["full_throttle"], steering_corrections=source_metrics["corrections"],
         ))
     confidence = min(1.0, len(representative) / 5) * float(np.mean([s.confidence for s in segments]))
+    enough_data = len(valid) >= 3
+    recommendations = build_recommendations(segments) if enough_data else []
+    insights = build_insights(segments, median, len(valid))
+    sufficiency = DataSufficiency(
+        status="ready" if len(valid) >= 5 else "limited" if enough_data else "insufficient",
+        valid_laps=len(valid), message_key=(
+            "data.ready" if len(valid) >= 5 else "data.limited" if enough_data else "data.needMoreLaps"
+        ),
+    )
     return AnalysisReport(
         session_id=session_id, track=str(run.metadata.get("track", "Unknown track")),
         car=str(run.metadata.get("car", "Unknown car")), created_at=datetime.now(timezone.utc),
         sample_count=len(_as_float(run, "session_time")),
         laps=[LapSummary(number=x.number, time=x.time, valid=x.valid, representative=x.representative, reason=x.reason) for x in laps],
-        best_lap=best.number, best_time=best.time, median_lap=median.number, median_time=median.time,
-        sector_optimal=sector_optimal, potential_gap=max(0, best.time - sector_optimal),
-        segments=segments, recommendations=build_recommendations(segments), confidence=confidence,
+        best_lap=best.number, best_time=best.time,
+        median_lap=median.number if enough_data else None, median_time=median.time if enough_data else None,
+        sector_optimal=sector_optimal if enough_data else None,
+        potential_gap=max(0, best.time - sector_optimal) if enough_data else None,
+        segments=segments, recommendations=recommendations, confidence=confidence,
+        session_type=session_type, layout=layout, track_id=optional_int("track_id"),
+        official_turns=optional_int("official_turns"), stints=detect_stints(run),
+        insights=insights, strengths=insights, improvement_actions=recommendations,
+        data_sufficiency=sufficiency,
+        track_map=build_track_map(best, median, segments, insights),
     )
 
 
