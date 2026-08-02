@@ -2,9 +2,9 @@ import i18n from 'i18next'
 import{initReactI18next}from'react-i18next'
 
 const common={
- title:'iRacing Analyst',sessions:'Sessions',import:'Import telemetry',waiting:'Waiting for iRacing',recording:'Recording',
+ title:'iRacing Analyst',sessions:'Sessions',import:'Import telemetry',waiting:'Waiting for iRacing or LMU',recording:'Recording',
  best:'Best lap',median:'Median pace',optimal:'Sector optimal',potential:'Potential gap',corners:'Corners and zones',
- noSession:'Import an IBT/NPZ file or complete an iRacing session.',selected:'Best',reference:'Median',sourceLap:'Source lap',
+ noSession:'Import an IBT/DuckDB/NPZ file or complete an iRacing or LMU session.',selected:'Best',reference:'Median',sourceLap:'Source lap',
  loss:'Available gain',speed:'Speed',throttle:'Throttle',brake:'Brake',steering:'Steering',delta:'Delta',map:'Track and racing line',
  whyFaster:'Why this lap was faster',improve:'What to improve next run',noInsights:'No reliable difference was found yet.',
  delete:'Delete',clear:'Clear test data',confirmClear:'Delete every locally recorded session?',validLaps:'valid laps',turns:'turns',
@@ -25,9 +25,9 @@ const common={
  'badge.best':'Best','badge.median':'Median','badge.clean':'Clean','badge.out_lap':'Out lap','badge.in_lap':'In lap','badge.pit':'Pit','badge.incomplete':'Incomplete','badge.invalid':'Invalid','badge.incident_1x':'Incident 1x','badge.incident_2x':'Incident 2x','badge.incident_4x':'Incident 4x',outShort:'Out',deleteSession:'Delete session'
 }
 const ru={
- ...common,title:'iRacing Аналитик',sessions:'Сессии',import:'Импорт телеметрии',waiting:'Ожидание iRacing',recording:'Идёт запись',
+ ...common,title:'iRacing Аналитик',sessions:'Сессии',import:'Импорт телеметрии',waiting:'Ожидание iRacing или LMU',recording:'Идёт запись',
  best:'Лучший круг',median:'Медианный темп',optimal:'Sector Optimal',potential:'Потенциал',corners:'Повороты и зоны',
- noSession:'Импортируйте IBT/NPZ или завершите сессию iRacing.',selected:'Лучший',reference:'Медианный',sourceLap:'Круг-источник',
+ noSession:'Импортируйте IBT/DuckDB/NPZ или завершите сессию iRacing либо LMU.',selected:'Лучший',reference:'Медианный',sourceLap:'Круг-источник',
  loss:'Доступный выигрыш',speed:'Скорость',throttle:'Газ',brake:'Тормоз',steering:'Руль',delta:'Дельта',map:'Карта и траектория',
  whyFaster:'Почему этот круг быстрее',improve:'Что улучшить в следующем заезде',noInsights:'Надёжной разницы пока не найдено.',
  delete:'Удалить',clear:'Удалить тестовые данные',confirmClear:'Удалить все локально записанные сессии?',validLaps:'валидных кругов',turns:'поворотов',
