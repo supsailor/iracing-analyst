@@ -26,6 +26,8 @@ SPA_BOUNDARIES = (
 
 
 def catalog_for(metadata: dict[str, object]) -> list[CatalogCorner] | None:
+    if str(metadata.get("simulator", "iracing")).lower() != "iracing":
+        return None
     identity = " ".join(str(metadata.get(key, "")) for key in ("track", "track_name", "layout")).lower()
     turns = _int(metadata.get("official_turns"))
     if "spa" in identity and (turns in {None, 19}):

@@ -1,6 +1,8 @@
 import os
 import tempfile
 
+import duckdb
+
 os.environ["IRACING_ANALYST_DATA_DIR"] = tempfile.mkdtemp(prefix="iracing-analyst-test-")
 
 from fastapi.testclient import TestClient
@@ -40,3 +42,40 @@ def test_clear_requires_confirmation(tmp_path, monkeypatch):
     with TestClient(app) as client:
         assert client.delete("/api/sessions").status_code == 400
         assert client.delete("/api/sessions?confirm=true").json() == {"deleted": 0}
+
+
+def test_import_lmu_duckdb(tmp_path, monkeypatch):
+    monkeypatch.setattr(app_module, "store", SessionStore(tmp_path / "lmu-store"))
+    telemetry = tmp_path / "lmu.duckdb"
+    connection = duckdb.connect(str(telemetry))
+    connection.execute('CREATE TABLE metadata("key" VARCHAR, value VARCHAR)')
+    connection.executemany(
+        "INSERT INTO metadata VALUES (?, ?)",
+        [("TrackName", "LMU Test"), ("CarName", "LMGT3"), ("SessionType", "Practice")],
+    )
+    connection.execute(
+        "CREATE TABLE channelsList(channelName VARCHAR, frequency DOUBLE, unit VARCHAR)",
+    )
+    connection.executemany(
+        "INSERT INTO channelsList VALUES (?, ?, ?)",
+        [("GPS Time", 1, "s"), ("Lap Dist", 1, "m")],
+    )
+    connection.execute("CREATE TABLE eventsList(eventName VARCHAR, unit VARCHAR)")
+    connection.execute("INSERT INTO eventsList VALUES ('Lap', '')")
+    connection.execute('CREATE TABLE "GPS Time"(value DOUBLE)')
+    connection.execute('INSERT INTO "GPS Time" VALUES (0), (1), (2)')
+    connection.execute('CREATE TABLE "Lap Dist"(value DOUBLE)')
+    connection.execute('INSERT INTO "Lap Dist" VALUES (0), (500), (1000)')
+    connection.execute('CREATE TABLE "Lap"(ts DOUBLE, value DOUBLE)')
+    connection.execute('INSERT INTO "Lap" VALUES (0, 0)')
+    connection.close()
+
+    with TestClient(app) as client, telemetry.open("rb") as source:
+        response = client.post(
+            "/api/import",
+            files={"file": ("lmu.duckdb", source, "application/octet-stream")},
+        )
+
+    assert response.status_code == 201, response.text
+    assert response.json()["simulator"] == "lmu"
+    assert response.json()["capture_source"] == "duckdb"

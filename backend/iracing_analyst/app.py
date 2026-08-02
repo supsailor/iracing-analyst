@@ -13,19 +13,23 @@ from . import __version__
 from .analysis import compare_laps, telemetry_for_laps
 from .config import data_dir
 from .ingest import IbtReader, LiveCollector, read_npz
+from .lmu import LmuDuckDbReader, LmuLiveCollector
 from .models import AnalysisReport, HealthResponse, LapComparison, SessionListItem, TelemetrySeries
 from .storage import SessionStore
 
 
 store = SessionStore(data_dir())
 collector = LiveCollector(lambda run: store.add(run, "live"))
+lmu_collector = LmuLiveCollector(lambda run: store.add(run, "live"))
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     collector.start()
+    lmu_collector.start()
     yield
     collector.stop()
+    lmu_collector.stop()
 
 
 app = FastAPI(title="iRacing Analyst", version=__version__, lifespan=lifespan)
@@ -33,7 +37,17 @@ app = FastAPI(title="iRacing Analyst", version=__version__, lifespan=lifespan)
 
 @app.get("/api/health", response_model=HealthResponse)
 def health() -> HealthResponse:
-    return HealthResponse(simulator_connected=collector.connected, recording=collector.recording, version=__version__)
+    active = "iracing" if collector.recording else "lmu" if lmu_collector.recording else None
+    return HealthResponse(
+        simulator_connected=collector.connected or lmu_collector.connected,
+        recording=collector.recording or lmu_collector.recording,
+        version=__version__,
+        active_simulator=active,
+        iracing_connected=collector.connected,
+        iracing_recording=collector.recording,
+        lmu_connected=lmu_collector.connected,
+        lmu_recording=lmu_collector.recording,
+    )
 
 
 @app.get("/api/sessions", response_model=list[SessionListItem])
@@ -89,18 +103,26 @@ def comparison(session_id: str, selected_lap: int, reference_lap: int) -> LapCom
 @app.post("/api/import", response_model=AnalysisReport, status_code=201)
 async def import_telemetry(file: UploadFile = File(...)) -> AnalysisReport:
     suffix = Path(file.filename or "").suffix.lower()
-    if suffix not in {".ibt", ".npz"}:
-        raise HTTPException(415, "Only .ibt and .npz telemetry files are supported")
+    if suffix not in {".ibt", ".npz", ".duckdb"}:
+        raise HTTPException(415, "Only .ibt, .duckdb and .npz telemetry files are supported")
     with tempfile.TemporaryDirectory() as temporary:
         target = Path(temporary) / f"import{suffix}"
         with target.open("wb") as output:
             shutil.copyfileobj(file.file, output)
         try:
-            run = IbtReader().read(target) if suffix == ".ibt" else read_npz(target)
+            if suffix == ".ibt":
+                run = IbtReader().read(target)
+            elif suffix == ".duckdb":
+                run = LmuDuckDbReader().read(target)
+            else:
+                run = read_npz(target)
             if suffix == ".ibt":
                 run.metadata["original_name"] = file.filename or "telemetry.ibt"
-            source = "ibt" if suffix == ".ibt" else str(run.metadata.get("source", "npz"))
-            if source not in {"live", "ibt", "fixture", "npz"}:
+            source = (
+                "ibt" if suffix == ".ibt" else "duckdb" if suffix == ".duckdb"
+                else str(run.metadata.get("source", "npz"))
+            )
+            if source not in {"live", "ibt", "duckdb", "fixture", "npz"}:
                 source = "npz"
             return store.add(run, source)
         except (ValueError, OSError) as exc:

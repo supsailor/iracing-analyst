@@ -16,7 +16,7 @@ from .track_catalog import catalog_for
 
 
 GRID_SIZE = 1200
-ANALYSIS_VERSION = 2
+ANALYSIS_VERSION = 3
 
 
 @dataclass(slots=True)
@@ -95,7 +95,8 @@ def normalize_laps(run: TelemetryRun) -> list[NormalizedLap]:
     channels = [
         "speed", "throttle", "brake", "steering", "gear", "rpm", "long_accel",
         "lat_accel", "yaw", "yaw_rate", "incidents", "latitude", "longitude", "altitude",
-        "yaw_north", "velocity_x", "velocity_y", "enter_exit_reset",
+        "yaw_north", "velocity_x", "velocity_y", "position_x", "position_y",
+        "enter_exit_reset", "lap_invalidated", "track_limits",
     ]
     grid = np.linspace(0.0, 1.0, GRID_SIZE, endpoint=False)
     result: list[NormalizedLap] = []
@@ -144,12 +145,15 @@ def normalize_laps(run: TelemetryRun) -> list[NormalizedLap]:
         in_lap = not bool(pit[acquisition_indices[0]]) and bool(pit[acquisition_indices[-1]])
         missing = coverage < 0.94 or unique_dist.size < 120
         stopped = duration <= 0 or bool(np.mean(_as_float(run, "speed")[indices] < 1.0) > 0.08)
+        invalidated = bool(np.any(_as_float(run, "lap_invalidated")[acquisition_indices] > 0))
         # A completed incident lap remains analytically useful. Pit/out/in and incomplete laps do not.
         valid = iracing_number > 0 and not (
-            has_pit or missing or stopped or out_lap or in_lap or "non_monotonic_elapsed" in quality
+            has_pit or missing or stopped or out_lap or in_lap or invalidated
+            or "non_monotonic_elapsed" in quality
         )
-        reason = "pit" if has_pit else "missing_data" if missing else "stopped" if stopped else (
-            None
+        reason = (
+            "pit" if has_pit else "missing_data" if missing else "stopped" if stopped
+            else "lap_invalidated" if invalidated else None
         )
         values = {}
         for channel in channels:
@@ -417,6 +421,15 @@ def detect_stints(run: TelemetryRun) -> list[StintSummary]:
 
 
 def _trajectory(lap: NormalizedLap) -> tuple[list[MapPoint], str]:
+    world_x = lap.values["position_x"]
+    world_y = lap.values["position_y"]
+    if np.ptp(world_x) > 10 and np.ptp(world_y) > 10:
+        x, y = world_x, world_y
+        source = "world_xy"
+        return [
+            MapPoint(distance_pct=float(lap.grid[index]), x=float(x[index]), y=float(y[index]))
+            for index in range(0, GRID_SIZE, 6)
+        ], source
     lat = lap.values["latitude"]
     lon = lap.values["longitude"]
     valid_gps = np.ptp(lat) > 1e-7 and np.ptp(lon) > 1e-7
@@ -555,6 +568,9 @@ def analyze(run: TelemetryRun, session_id: str | None = None) -> AnalysisReport:
             data_sufficiency=DataSufficiency(status="insufficient", valid_laps=0, message_key="data.noValidLaps"),
             analysis_version=ANALYSIS_VERSION, data_quality_status="corrupted",
             data_quality_reasons=["no_valid_laps"],
+            simulator=str(run.metadata.get("simulator", "iracing")),
+            capture_source=str(run.metadata.get("capture_source", run.metadata.get("source", "live"))),
+            coordinate_system=str(run.metadata.get("coordinate_system", "integrated")),
         )
     best = min(valid, key=lambda x: x.time)
     pool = representative or valid
@@ -641,6 +657,9 @@ def analyze(run: TelemetryRun, session_id: str | None = None) -> AnalysisReport:
             "corrupted" if not optimal_valid else "recovered" if quality_reasons else "ok"
         ),
         data_quality_reasons=sorted(set(quality_reasons)),
+        simulator=str(run.metadata.get("simulator", "iracing")),
+        capture_source=str(run.metadata.get("capture_source", run.metadata.get("source", "live"))),
+        coordinate_system=str(run.metadata.get("coordinate_system", "integrated")),
     )
 
 

@@ -20,7 +20,8 @@ IRSDK_TYPES = {
 VARIABLE_ALIASES = {
     "session_time": "SessionTime", "lap": "Lap", "lap_dist_pct": "LapDistPct",
     "speed": "Speed", "throttle": "Throttle", "brake": "Brake", "steering": "SteeringWheelAngle",
-    "gear": "Gear", "rpm": "RPM", "long_accel": "LongAccel", "lat_accel": "LatAccel",
+    "clutch": "Clutch", "gear": "Gear", "rpm": "RPM", "long_accel": "LongAccel",
+    "lat_accel": "LatAccel",
     "yaw": "Yaw", "yaw_rate": "YawRate", "on_pit_road": "OnPitRoad",
     "track_surface": "PlayerTrackSurface", "incidents": "PlayerCarMyIncidentCount",
     "session_num": "SessionNum", "session_state": "SessionState",
@@ -83,7 +84,9 @@ class IbtReader:
             match = re.search(rf"^\s*{re.escape(key)}:\s*(.+?)\s*$", session, re.MULTILINE)
             return match.group(1).strip('"') if match else fallback
         metadata = {
-            "source": "ibt", "tick_rate": tick_rate, "track": yaml_value("TrackDisplayName", path.stem),
+            "source": "ibt", "capture_source": "ibt", "simulator": "iracing",
+            "coordinate_system": "gps", "tick_rate": tick_rate,
+            "track": yaml_value("TrackDisplayName", path.stem),
             "car": yaml_value("CarScreenName", "Unknown car"), "original_path": str(path),
             "track_name": yaml_value("TrackName", ""), "layout": yaml_value("TrackConfigName", ""),
             "track_id": yaml_value("TrackID", ""), "official_turns": yaml_value("TrackNumTurns", ""),
@@ -132,7 +135,10 @@ class LiveCollector:
         import irsdk  # type: ignore
         sdk = irsdk.IRSDK()
         collected: dict[str, list] = {key: [] for key in CHANNELS}
-        metadata: dict[str, object] = {"source": "live"}
+        metadata: dict[str, object] = {
+            "source": "live", "capture_source": "live", "simulator": "iracing",
+            "coordinate_system": "gps",
+        }
         finalized = False
         active_key: str | None = None
         disconnected_at: float | None = None
@@ -210,11 +216,14 @@ class LiveCollector:
                 continue
             try:
                 sdk.freeze_var_buffer_latest()
+                frame: dict[str, object] = {}
                 for target, source in VARIABLE_ALIASES.items():
                     value = sdk[source]
-                    collected[target].append(0 if value is None else value)
-                collected["capture_epoch"].append(capture_epoch)
-                collected["sample_sequence"].append(sample_sequence)
+                    frame[target] = 0 if value is None else value
+                frame["capture_epoch"] = capture_epoch
+                frame["sample_sequence"] = sample_sequence
+                for key in CHANNELS:
+                    collected[key].append(frame.get(key, 0))
                 sample_sequence += 1
             except (AttributeError, IndexError, TypeError):
                 pass

@@ -12,7 +12,7 @@ from .analysis import analyze
 from .models import AnalysisReport, SessionListItem, TelemetryRun
 
 
-ANALYSIS_VERSION = 2
+ANALYSIS_VERSION = 3
 
 
 class SessionStore:
@@ -33,11 +33,16 @@ class SessionStore:
         columns = {row[1] for row in self.connection.execute("PRAGMA table_info(sessions)")}
         for name, declaration in (
             ("session_key", "TEXT"), ("session_type", "TEXT"), ("layout", "TEXT"),
+            ("simulator", "TEXT"), ("capture_source", "TEXT"), ("source_fingerprint", "TEXT"),
         ):
             if name not in columns:
                 self.connection.execute(f"ALTER TABLE sessions ADD COLUMN {name} {declaration}")
         self.connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_sessions_session_key ON sessions(session_key)",
+        )
+        self.connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sessions_source_fingerprint "
+            "ON sessions(source_fingerprint)",
         )
         self.connection.commit()
         self._reanalyze_outdated()
@@ -46,8 +51,17 @@ class SessionStore:
         metadata = dict(run.metadata)
         metadata["source"] = source or str(metadata.get("source", "npz"))
         session_key = str(metadata.get("session_key", "")).strip()
+        fingerprint = str(metadata.get("source_fingerprint", "")).strip()
         with self._lock:
             existing = None
+            if fingerprint:
+                duplicate = self.connection.execute(
+                    "SELECT report_json FROM sessions WHERE source_fingerprint = ? "
+                    "ORDER BY created_at DESC LIMIT 1",
+                    (fingerprint,),
+                ).fetchone()
+                if duplicate and duplicate["report_json"]:
+                    return AnalysisReport.model_validate_json(duplicate["report_json"])
             if metadata["source"] == "live" and session_key:
                 existing = self.connection.execute(
                     "SELECT id FROM sessions WHERE session_key = ? ORDER BY created_at DESC LIMIT 1",
@@ -67,19 +81,22 @@ class SessionStore:
             values = (
                 report.created_at.isoformat(), report.track, report.car, metadata["source"], "ready",
                 str(path), report.model_dump_json(), None, session_key or None,
-                report.session_type, report.layout, session_id,
+                report.session_type, report.layout, report.simulator, report.capture_source,
+                fingerprint or None, session_id,
             )
             if existing:
                 self.connection.execute("""
                     UPDATE sessions SET created_at=?, track=?, car=?, source=?, status=?, telemetry_path=?,
-                    report_json=?, error=?, session_key=?, session_type=?, layout=? WHERE id=?
+                    report_json=?, error=?, session_key=?, session_type=?, layout=?, simulator=?,
+                    capture_source=?, source_fingerprint=? WHERE id=?
                 """, values)
             else:
                 self.connection.execute("""
                     INSERT INTO sessions (
                         created_at, track, car, source, status, telemetry_path, report_json, error,
-                        session_key, session_type, layout, id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        session_key, session_type, layout, simulator, capture_source,
+                        source_fingerprint, id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, values)
             self.connection.commit()
             return report
@@ -158,6 +175,7 @@ class SessionStore:
                 session_type=report.session_type if report else (row["session_type"] or "Session"),
                 layout=report.layout if report else (row["layout"] or ""),
                 valid_laps=sum(lap.valid for lap in report.laps) if report else 0,
+                simulator=report.simulator if report else (row["simulator"] or "iracing"),
             ))
         return result
 

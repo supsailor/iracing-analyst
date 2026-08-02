@@ -75,5 +75,5 @@ def test_old_report_is_automatically_reanalyzed_without_rewriting_npz(tmp_path):
 
     migrated = SessionStore(tmp_path)
 
-    assert migrated.report(report.session_id).analysis_version == 2
+    assert migrated.report(report.session_id).analysis_version == 3
     assert open(telemetry_path, "rb").read() == before

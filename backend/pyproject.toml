@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "iracing-analyst"
 version = "0.2.1"
-description = "Local iRacing lap telemetry analyst"
+description = "Local lap telemetry analyst for iRacing and Le Mans Ultimate"
 requires-python = ">=3.11"
 dependencies = [
   "fastapi>=0.115,<1",
@@ -13,6 +13,7 @@ dependencies = [
   "numpy>=2.0,<3",
   "python-multipart>=0.0.12,<1",
   "platformdirs>=4.3,<5",
+  "duckdb>=1.2,<2",
   "pyirsdk>=1.3.5,<2; sys_platform == 'win32'",
 ]
 

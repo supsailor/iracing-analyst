@@ -9,10 +9,11 @@ from pydantic import BaseModel, Field
 
 CHANNELS = (
     "session_time", "lap", "lap_dist_pct", "speed", "throttle", "brake", "steering",
-    "gear", "rpm", "long_accel", "lat_accel", "yaw", "yaw_rate", "on_pit_road",
+    "clutch", "gear", "rpm", "long_accel", "lat_accel", "yaw", "yaw_rate", "on_pit_road",
     "track_surface", "incidents", "session_num", "session_state", "session_unique_id",
     "session_tick", "is_on_track_car", "enter_exit_reset", "latitude", "longitude",
-    "altitude", "yaw_north", "velocity_x", "velocity_y",
+    "altitude", "yaw_north", "velocity_x", "velocity_y", "position_x", "position_y",
+    "lap_invalidated", "track_limits",
     "capture_epoch", "sample_sequence",
 )
 
@@ -93,7 +94,7 @@ class TrackMarker(BaseModel):
 
 class TrackMap(BaseModel):
     available: bool = False
-    source: Literal["gps", "integrated", "unavailable"] = "unavailable"
+    source: Literal["gps", "world_xy", "integrated", "unavailable"] = "unavailable"
     centerline: list[MapPoint] = Field(default_factory=list)
     best: list[MapPoint] = Field(default_factory=list)
     median: list[MapPoint] = Field(default_factory=list)
@@ -199,6 +200,9 @@ class AnalysisReport(BaseModel):
     analysis_version: int = 1
     data_quality_status: Literal["ok", "recovered", "corrupted"] = "ok"
     data_quality_reasons: list[str] = Field(default_factory=list)
+    simulator: Literal["iracing", "lmu"] = "iracing"
+    capture_source: Literal["live", "ibt", "duckdb", "fixture", "npz"] = "live"
+    coordinate_system: Literal["gps", "world_xy", "integrated"] = "integrated"
 
 
 class SessionListItem(BaseModel):
@@ -206,13 +210,14 @@ class SessionListItem(BaseModel):
     created_at: datetime
     track: str
     car: str
-    source: Literal["live", "ibt", "fixture", "npz"]
+    source: Literal["live", "ibt", "duckdb", "fixture", "npz"]
     laps: int
     best_time: float | None
     status: Literal["recording", "ready", "failed"]
     session_type: str = "Practice"
     layout: str = ""
     valid_laps: int = 0
+    simulator: Literal["iracing", "lmu"] = "iracing"
 
 
 class HealthResponse(BaseModel):
@@ -220,6 +225,11 @@ class HealthResponse(BaseModel):
     simulator_connected: bool
     recording: bool
     version: str
+    active_simulator: Literal["iracing", "lmu"] | None = None
+    iracing_connected: bool = False
+    iracing_recording: bool = False
+    lmu_connected: bool = False
+    lmu_recording: bool = False
 
 
 class TelemetrySeries(BaseModel):
